@@ -38,13 +38,14 @@
 
 # 2. 数据源范围
 
-O3Pilot 当前运行时数据源分为五类：
+O3Pilot 当前运行时数据源分为六类：
 
 1. Ozon Seller API；
 2. Ozon Performance API；
-3. Ozon Push Webhook；
-4. Ozon 官方报告；
-5. 卖家自有数据。
+3. Ozon Exchange Rate API；
+4. Ozon Push Webhook；
+5. Ozon 官方报告；
+6. 卖家自有数据。
 
 Google Drive、开发参考资料、历史 O3Pilot 代码、API 测试报告等不属于 O3Pilot 运行时数据源。
 
@@ -165,8 +166,13 @@ O3Pilot 必须维护显式只读接口 allowlist。
 | 店铺 Rating | Seller API Rating | Seller Info 中部分指标 |
 | Questions / Answers | Seller API | — |
 | Reviews | Seller API，受订阅权限影响 | — |
-| 商品采购成本等内部数据 | 卖家自有数据 | — |
-| 最终利润 | 多来源派生 | Finance + Seller Data + Advertising |
+| Ozon 业务汇率 | Ozon Exchange Rate API | Ozon 官方财务规则 / 报告核验 |
+| 商品采购成本 | 卖家自有数据 / ERP | — |
+| 卖家实际物流成本 | 卖家自有数据 / 物流商导出 | Ozon 订单用于关联 |
+| 包裹实际 / 体积 / 计费重量 | 物流商 / Seller Data | Ozon 订单和商品属性用于核验 |
+| 在途库存 | 卖家自有数据 / Ozon 可获得交货事实 | Ozon 官方报告 |
+| Settlement / Payout | Ozon 官方财务报告 | Finance Accrual 用于对账 |
+| 最终利润 | 多来源派生 | Finance + Seller Data + Advertising + FX |
 
 “主来源”只表示该业务事实的首选运行时来源，不代表其数据永远没有错误。
 
@@ -686,6 +692,61 @@ Beta 接口必须保存原始响应，并接受字段或 Contract 未来发生�
 
 ---
 
+## 13.5 发货截止时间与承诺配送窗口
+
+订单来源中已经确认存在多种不同时间语义，包括：
+
+- 订单创建时间；
+- 进入处理时间；
+- 发运日期；
+- 不逾期发运日期 / 发货截止时间；
+- 实际转移配送时间；
+- 承诺配送开始 / 结束时间；
+- 实际配送时间；
+- 取消时间。
+
+这些字段不得压缩成单一 `shipment_date` 或 `delivery_date`。
+
+如果 Ozon 后续通过 API 或 Webhook 修改发货截止时间或承诺配送窗口：
+
+- 当前值应更新；
+- 历史值必须保留；
+- 具体历史实体由 `DATA_MODEL.md` 定义。
+
+这类数据用于时效指标，但指标公式进入 `METRICS.md`。
+
+---
+
+## 13.6 仓库、物流商、配送方式与包裹
+
+当前订单来源可以提供：
+
+- Warehouse；
+- Logistics Provider；
+- Delivery Method；
+- Tracking Number；
+- 部分商品重量；
+- 部分 Posting Volume Weight；
+- Region / City；
+- Cluster From / Cluster To。
+
+但 O3Pilot 必须区分：
+
+```text
+Product Weight
+Package Actual Weight
+Package Volumetric Weight
+Package Chargeable Weight
+```
+
+商品属性接口中的重量 / 尺寸不能自动作为物流实际计费重量。
+
+订单 API 的 `volume_weight` 也不能在没有来源语义确认时自动解释为所有物流商最终账单计费重量。
+
+物流商实际账单或导出数据属于 Seller-Owned Data。
+
+---
+
 # 14. 取消
 
 取消数据主要来自：
@@ -816,6 +877,30 @@ schema = Whd
 具体分子、分母、归属日期和跨期逻辑由 `METRICS.md` 定义。
 
 DATA_SOURCES 只负责保证底层订单与退货事实可以追溯。
+
+---
+
+## 15.5 逆向物流生命周期
+
+Ozon 当前业务规则中，取消、未认购和客户退货可能继续进入：
+
+- 逆向运输；
+- WHD 入库；
+- 仓储；
+- 减价；
+- 再销售；
+- 退回卖家；
+- 销毁；
+- 赔偿。
+
+当前 Seller API / Returns 数据可以提供其中部分事实，但并不能保证每个阶段都有完整事件。
+
+因此：
+
+- 已取得的阶段事实进入 Normalized Fact；
+- 未取得的中间阶段不得根据最终状态反推；
+- Ozon 官方报告可以作为人工补充 / 对账来源；
+- 生命周期实体由 `DATA_MODEL.md` 定义。
 
 ---
 
@@ -1002,6 +1087,41 @@ Ozon 公告关闭日期：
 - `container_fees` 当前缺少非空真实样本。
 
 这些未知项不能通过推测补齐。
+
+---
+
+## 16.8 Settlement / Payout
+
+Ozon Finance Accrual 与卖家实际收到的结算付款不是同一层事实。
+
+当前已确认 Seller Center 财务体系存在：
+
+- 结算周期；
+- 付款；
+- 计划 / 实际付款状态；
+- 相互结算报告；
+- 外币支付报告；
+- 对账单；
+- 修正文件。
+
+当前没有在本基线中验证一个可以完整替代这些报告的稳定只读 Seller API Contract。
+
+因此首版定义：
+
+```text
+Finance Accrual = 自动主链路
+Settlement / Payout = Ozon 官方财务报告 MANUAL + Accrual Reconciliation
+```
+
+不得根据 Accrual 金额自行推断：
+
+```text
+已付款
+实际付款日期
+实际到账金额
+```
+
+这些必须来自明确来源。
 
 ---
 
@@ -2054,6 +2174,17 @@ Seller Center 财务区域还提供多种结算和参考文件，例如：
 
 不得只按“月份 + 文件名”覆盖旧版本。
 
+其中：
+
+- 相互结算报告；
+- 外币支付报告；
+- 对账单；
+- 修正文件；
+
+可以成为 `Settlement / Payout` 域的人工事实来源。
+
+但其字段和生成周期仍以具体报告类型为准，不能用统一 Schema 强行合并。
+
 ---
 
 ## 26.5 官方报告格式
@@ -2102,7 +2233,11 @@ Match / Difference / Unknown
 
 属于：
 
-`MANUAL` 或用户维护数据。
+`MANUAL`、ERP Import、物流商文件导入或用户维护数据。
+
+Google Drive 中保存的开发样本本身不属于运行时数据源。
+
+O3Pilot 运行时只处理用户主动导入或配置的数据。
 
 ---
 
@@ -2114,20 +2249,179 @@ Match / Difference / Unknown
 - 国内物流成本；
 - 国际物流成本；
 - 包装成本；
-- SKU 实测包装重量；
-- SKU 实测包装体积；
+- SKU / 包裹实测重量；
+- SKU / 包裹实测体积；
+- 物流商实际计费重量；
 - 供应商；
 - 采购周期；
 - 备货周期；
 - 在途库存；
 - 内部商品名称；
 - 内部商品分类；
-- 商品映射；
+- 跨店商品映射；
 - 其他经营成本和参数。
 
 ---
 
-## 27.3 规则
+## 27.3 马帮 ERP 成本 Adapter
+
+状态：`MANUAL`
+
+样本验证：`VERIFIED FORMAT SAMPLE`
+
+当前开发样本已经确认马帮 ERP 导出包含：
+
+```text
+订单编号
+平台SKU
+平台SKU数量
+平台SKU单个成本
+汇率(原币)
+平台链接
+```
+
+这些字段可以作为订单商品采购成本导入的首个正式 Adapter 基础。
+
+当前样本支持的处理原则：
+
+- `订单编号` 用于关联 Ozon Posting；
+- `平台SKU` 是 ERP 自身字段名，不能因名称包含 SKU 就直接等同 Ozon 数字 `sku`；
+- `平台SKU单个成本` 与 `汇率(原币)` 必须原样保存；
+- 当前样本支持 `transaction_cost_amount = cost_basis_amount / erp_exchange_rate` 的 Adapter 计算；
+- 具体目标币种必须结合对应 Ozon 订单 / 店铺真实币种和 Adapter Profile 决定；
+- 不得硬编码 `6.9 = USD`；
+- 同一商品不同订单可以拥有不同历史采购成本。
+
+因此：
+
+历史 Profit 优先使用订单商品实际采购成本，而不是今天 SKU 的最新参考成本。
+
+---
+
+## 27.4 卖家采购成本汇率
+
+ERP / Seller Cost FX 与 Ozon Business FX 完全分开。
+
+```text
+Seller Cost FX
+!=
+Ozon Exchange Rate
+```
+
+Ozon Exchange Rate 不得自动用于采购成本换算。
+
+ERP 成本汇率也不得用于改写 Ozon Finance 原始金额。
+
+---
+
+## 27.5 物流商导出与 Seller Logistics Cost
+
+状态：`MANUAL`
+
+Adapter 状态：`FORMAT TO BE ADAPTERIZED`
+
+开发参考资料中已经存在真实物流商导出样本，因此 O3Pilot 数据模型必须为以下 Seller-Owned Facts 预留正式位置：
+
+- Posting / Shipment 关联；
+- 物流商；
+- 国内 / 国际 / 退回等费用；
+- 实际重量；
+- 体积重量；
+- 计费重量；
+- 账单时间；
+- 原始币种；
+- 原始行。
+
+正式运行时不读取 Drive 中的样本文件。
+
+首版实现应采用：
+
+```text
+User Upload
+→ Logistics Provider Adapter
+→ Raw Import Row
+→ Seller Logistics Fact
+```
+
+具体字段映射在实现 Adapter 前以真实导出 Schema 再验证。
+
+不能把：
+
+```text
+Ozon Finance Logistics Fee
+```
+
+与：
+
+```text
+Seller / Logistics Provider Actual Cost
+```
+
+合并为同一个原始字段。
+
+---
+
+## 27.6 包裹测量数据
+
+卖家 / 物流商可能提供：
+
+- 包裹实际重量；
+- 长宽高；
+- 体积；
+- 体积重量；
+- 最终计费重量。
+
+这些属于 Package / Shipment Fact。
+
+它们不能覆盖商品卡片 Product Attribute 中的重量和尺寸。
+
+如果同一包裹存在多个来源测量结果，应全部保留来源并允许对账。
+
+---
+
+## 27.7 在途库存
+
+在途库存属于独立于当前 Ozon 可售库存的事实。
+
+来源可以包括：
+
+- 卖家手工维护；
+- ERP；
+- 物流商；
+- Ozon 可读取的交货 / 入库事实；
+- Ozon 官方报告。
+
+当前 Ozon Seller API 基线尚未验证一个足以覆盖所有 FBP 在途库存生命周期的完整只读 Contract。
+
+因此：
+
+```text
+Current Inventory
+!=
+In-transit Inventory
+```
+
+首版不能为了补货计算方便，把“计划发货数量”直接加进当前库存字段。
+
+---
+
+## 27.8 跨店 Seller Catalog Mapping
+
+同一真实商品可能存在于多个 Ozon Shop，并拥有不同：
+
+- Ozon Product ID；
+- SKU；
+- offer_id。
+
+跨店合并属于 Seller-Owned Mapping。
+
+允许用户显式建立 Seller Catalog Item 与各 Shop Product 的映射。
+
+不得只根据相同 `offer_id`、商品名或 SKU 自动认定为同一商品。
+
+---
+
+## 27.9 规则
 
 卖家数据只能覆盖“卖家拥有定义权”的字段。
 
@@ -2137,7 +2431,10 @@ Match / Difference / Unknown
 
 - 采购成本；
 - 供应商；
-- Lead Time。
+- Lead Time；
+- 物流商实际费用；
+- 包裹实际测量；
+- 跨店内部商品映射。
 
 卖家数据不能覆盖：
 
@@ -2191,8 +2488,15 @@ Match / Difference / Unknown
 | FBS Error Posting | Seller API | — | PARTIAL | 当前无真实 Error 行 |
 | Webhook Type | Seller API | — | VERIFIED | Payload 不可由 Type 名称推断 |
 | Webhook Payload | Webhook | Seller API 回读 | PARTIAL | 真实事件 Contract 尚未完整验证 |
+| Ozon 业务汇率 | Ozon Exchange Rate API | 官方财务规则 / 报告 | VERIFIED | Undocumented XAPI；需持久化历史并容忍接口变化 |
 | 官方报告 | 用户上传 | — | MANUAL | 低频、可能存在修正版 |
-| 采购成本等 | 卖家自有数据 | — | MANUAL | 用户负责维护 |
+| Settlement / Payout | 官方财务报告 | Finance Accrual 对账 | MANUAL | 当前无完整自动 API Contract |
+| 采购成本 | ERP / 卖家自有数据 | — | MANUAL | 历史订单成本需版本化 |
+| Seller Cost FX | ERP / 卖家自有数据 | — | MANUAL | 不得与 Ozon FX 混用 |
+| Seller Logistics Cost | 物流商 / 卖家自有数据 | Orders 关联 | MANUAL | Adapter Schema 需逐类验证 |
+| Package Measurement | 物流商 / 卖家自有数据 | Product / Orders 核验 | MANUAL | Product Weight ≠ Package Weight |
+| In-transit Inventory | 卖家数据 / Ozon 可得交货事实 | 官方报告 | MANUAL | 当前无完整自动覆盖 Contract；自动来源待验证 |
+| Seller Catalog Mapping | 卖家自有数据 | Product | MANUAL | 必须显式映射 |
 
 ---
 
@@ -2220,8 +2524,14 @@ Match / Difference / Unknown
 | Phrases | 异步报表 | 当前不可作为历史主来源 |
 | Rating History | 日期范围 | 可获取当前可用历史区间 |
 | Webhook | 无历史回放保证 | 必须用 Seller API 对账补漏 |
-| 官方报告 | 取决于 Seller Center 可生成范围 | 人工导入 |
-| 卖家数据 | 用户维护 | 对关键成本建立历史版本 |
+| Ozon Exchange Rate | 支持 Period 查询；长期稳定性未承诺 | 持久化每日 / 区间历史 |
+| 官方报告 | 取决于 Seller Center 可生成范围 | 人工导入并保留文件版本 |
+| Settlement / Payout | 依赖 Seller Center 报告保留范围 | 导入后长期保存 |
+| ERP 订单实际采购成本 | 取决于用户 ERP 导出 | 按订单商品长期保存 |
+| Seller Logistics Cost | 取决于物流商账单 / 导出 | 按 Posting / Package 长期保存 |
+| Package Measurement | 取决于物流商 / Seller Data | 保存来源与测量时间 |
+| In-transit Inventory | 来源能力不同 | 保存状态历史，不覆盖当前库存 |
+| Seller Catalog Mapping | 用户维护 | 保存有效期与映射版本 |
 
 ---
 
@@ -2442,7 +2752,9 @@ Ozon API 的：
 
 ---
 
-# 36. 货币规则
+# 36. 货币与汇率规则
+
+## 36.1 Money 原则
 
 所有 Money 数据必须优先保存：
 
@@ -2461,6 +2773,122 @@ Ozon API 的：
 - Price Index 的比较价格可以拥有独立币种。
 
 因此币种是字段级事实，不是店铺级全局常量。
+
+---
+
+## 36.2 Ozon Exchange Rate API
+
+状态：`VERIFIED`
+
+接口性质：`Undocumented Ozon XAPI`
+
+当前已验证接口：
+
+```text
+GET https://xapi.ozon.ru/exchange-rates/sellers/exchange-rate/by-period
+```
+
+该接口来自 Ozon 官方帮助页面实际使用的 `xapi.ozon.ru` 数据请求。
+
+当前验证特点：
+
+- 不属于 Seller API / Performance API 正式公开 Contract；
+- 当前请求无需 Seller API Key / Cookie；
+- 支持按时间段查询；
+- 可以获得多个币种相对 RUB 的汇率时间线；
+- 已确认存在 `rate` 与 `rateWithAdjustment` 两套值。
+
+当前页面语义：
+
+```text
+rate
+→ 服务和罚款
+
+rateWithAdjustment
+→ 销售
+```
+
+因此 O3Pilot 将其作为正式运行时辅助数据源，但稳定性级别低于公开 Seller API Contract。
+
+必须：
+
+- 保存 Raw Response；
+- 保存 Fetch Time；
+- 持久化历史区间；
+- 允许 Schema / Endpoint 变化；
+- 不依赖页面实时调用才能解释历史 Profit。
+
+---
+
+## 36.3 Ozon Business FX 与 Seller Cost FX
+
+必须严格区分：
+
+```text
+Ozon Business FX
+!=
+Seller Cost FX
+```
+
+Ozon Business FX 用于解释 Ozon 自己的业务换算。
+
+Seller Cost FX 来自：
+
+- ERP；
+- 卖家维护；
+- 其他 Seller-Owned Cost Source。
+
+Ozon FX 不得自动用于采购成本。
+
+Seller Cost FX 不得改写 Ozon Finance 原始金额。
+
+---
+
+## 36.4 汇率适用时间依据
+
+不能假设所有 Ozon 业务金额都使用“订单创建日汇率”。
+
+当前 Ozon 业务规则已经证明不同费用存在不同时间依据，例如：
+
+```text
+ORDER_CREATED_AT
+SERVICE_PROVIDED_AT
+ACCRUAL_DATE
+```
+
+销售及部分配送 / 转售费用可能使用订单创建时间。
+
+仓储、逆向物流、销毁、取货点处理等服务可能使用服务提供时间。
+
+因此每次 Money Conversion 必须保存：
+
+```text
+rate_basis_type
+rate_basis_time
+rate_policy_version
+```
+
+而不是只保存一个笼统 `business_time`。
+
+---
+
+## 36.5 Exchange Rate Timeline
+
+Ozon Exchange Rate 返回的是时间区间，而不是简单的：
+
+```text
+YYYY-MM-DD = rate
+```
+
+当前实测时间边界以 UTC 21:00 切分，对应莫斯科自然日 00:00。
+
+正确匹配原则：
+
+```text
+valid_from <= rate_basis_time < valid_to
+```
+
+不能简单按北京时间日期 Join。
 
 ---
 
@@ -2672,6 +3100,18 @@ Explicit Read Allowlist
 
 ---
 
+## 41.4 Ozon Exchange Rate XAPI
+
+| Endpoint | 状态 | 备注 |
+|---|---|---|
+| `GET https://xapi.ozon.ru/exchange-rates/sellers/exchange-rate/by-period` | VERIFIED | Undocumented Ozon XAPI；官方帮助页面实际使用；销售 / 服务两套汇率；必须持久化历史 |
+
+该 Endpoint 不属于 Seller API allowlist。
+
+它应进入独立的 Ozon XAPI Read Allowlist，并保持与 Seller API / Performance API 凭证体系分离。
+
+---
+
 # 42. 待验证清单
 
 DATA_SOURCES v1.0 当前正式保留以下待验证项目：
@@ -2718,6 +3158,31 @@ DATA_SOURCES v1.0 当前正式保留以下待验证项目：
 
 - 正式只读历史数据接口和当前店铺真实返回。
 
+## Exchange Rate XAPI
+
+- Endpoint 长期稳定性；
+- 历史区间是否可能被 Ozon 修订；
+- Marketplace / Currency 覆盖范围变化；
+- 页面调用 Contract 变化检测。
+
+## Seller Logistics
+
+- 各物流商导出 Schema；
+- Posting / Package 稳定关联键；
+- 实际重量 / 体积重量 / 计费重量字段语义；
+- 退货物流费用的独立粒度。
+
+## Inbound Supply
+
+- 是否存在稳定且完整的只读 Seller API Contract；
+- 各状态与在途数量的可靠定义；
+- 验收入库数量的最终来源。
+
+## Settlement / Payout
+
+- 是否存在可替代人工财务报告的稳定只读 API；
+- 实际付款日期 / 状态 / 到账金额的自动来源。
+
 ---
 
 # 43. Phase 0 数据源验收标准
@@ -2757,7 +3222,19 @@ DATA_SOURCES v1.0 当前正式保留以下待验证项目：
 31. 空集合不会被无条件解释为业务 0；
 32. Ozon 官方报告导入具有 Report Type 和版本信息；
 33. 卖家自有数据与 Ozon 原始事实物理或逻辑区分；
-34. 同一同步任务重复执行不产生重复业务记录。
+34. Ozon Exchange Rate XAPI 具有独立 Read Allowlist、Raw 保存和历史持久化；
+35. Ozon Business FX 与 Seller Cost FX 分离；
+36. 每次汇率换算保存 Rate Basis Type / Time；
+37. 马帮 ERP 订单商品成本可以原样导入并关联 Posting Item；
+38. 历史订单实际采购成本不会被当前 SKU 成本覆盖；
+39. Seller Logistics Cost 与 Ozon Finance Logistics Fee 分离；
+40. Product Weight、Package Weight、Chargeable Weight 分离；
+41. 物流商导入可以保存 Raw Row 和 Mapping Status；
+42. 当前库存与在途库存分离；
+43. Settlement / Payout 不由 Finance Accrual 推断伪造；
+44. 跨店商品映射必须显式可追溯；
+45. Posting 发货截止和承诺配送窗口允许保存历史变化；
+46. 同一同步任务重复执行不产生重复业务记录。
 
 ---
 
@@ -2777,7 +3254,7 @@ DATA_SOURCES 负责回答：
 
 ## DATA_MODEL.md
 
-下一步定义：
+已经定义：
 
 - 原始对象如何保存；
 - 标准化实体；
@@ -2794,9 +3271,15 @@ DATA_SOURCES 负责回答：
 - Advertising；
 - Rating；
 - Question / Answer；
-- Source Lineage。
+- Source Lineage；
+- Seller Catalog；
+- Package；
+- Seller Logistics Cost；
+- Inbound Supply；
+- Settlement / Payout；
+- Ozon FX / Seller Cost FX。
 
-DATA_MODEL 不能定义一个 DATA_SOURCES 当前证明不存在的数据字段。
+DATA_MODEL 可以为已明确存在但当前只能人工导入的业务事实建立实体，但不能把未验证的 API 字段伪装成自动来源。
 
 ---
 
@@ -2852,11 +3335,23 @@ DATA_SOURCES 只定义数据源约束和同步性质，不提前锁定具体技�
 
 **Shop Currency 不等于所有 Money Currency。**
 
+**Ozon Business FX 不等于 Seller Cost FX。**
+
+**汇率换算必须保存适用时间依据。**
+
+**Product Weight 不等于 Package Weight，也不等于 Chargeable Weight。**
+
+**Ozon Finance Logistics Fee 不等于 Seller Logistics Cost。**
+
+**当前库存不等于在途库存。**
+
 **Webhook 负责变化发现，API 负责最终状态。**
 
 **Finance Accrual v1 是新系统 Finance 主链路。**
 
-**人工报告用于对账和补充，不承担日常自动化。**
+**人工报告用于对账和补充，也可以承载当前无自动 API 的 Settlement / Payout 事实。**
+
+**跨店商品只能通过显式 Seller Catalog Mapping 合并。**
 
 **时间窗口会失效的数据必须及时持久化。**
 
