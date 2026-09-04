@@ -77,11 +77,13 @@ Ozon 修改接口、订阅规则或业务结构后，状态必须重新验证。
 
 ## 4.1 原始数据优先
 
-O3Pilot 应尽可能保留 Ozon 原始响应。
+对于 Ozon API / Webhook 等自动来源，O3Pilot 应尽可能保留原始响应或原始事件。
 
-标准化字段、业务分类和派生指标不能替代原始事实。
+标准化字段、业务分类和派生指标不能替代这些自动来源的原始事实。
 
-当后续发现字段理解错误、API 语义变化或需要重新计算历史指标时，应能够从原始数据重新处理。
+当后续发现字段理解错误、API 语义变化或需要重新计算历史指标时，自动来源应能够从已保存的原始数据重新处理。
+
+人工文件导入不适用“保存原文件”规则，其持久化原则见 4.6。
 
 ---
 
@@ -97,7 +99,7 @@ O3Pilot 应尽可能保留 Ozon 原始响应。
 - 原始业务时间；
 - 数据覆盖时间范围；
 - 同步批次；
-- 原始响应或原始导入文件；
+- 原始响应，或人工导入对应的导入批次与来源行号；
 - 解析器或标准化规则版本。
 
 最终字段名称由 `DATA_MODEL.md` 定义。
@@ -143,6 +145,29 @@ Ozon Seller API 大量只读接口使用 HTTP `POST`。
 O3Pilot 必须维护显式只读接口 allowlist。
 
 所有未进入 allowlist 的 Ozon 接口默认禁止调用。
+
+---
+
+## 4.6 人工导入文件生命周期
+
+用户上传的 CSV / XLSX 等文件只作为一次性导入介质，不属于 O3Pilot 的持久化数据。
+
+解析后应保留：
+
+- 导入后的结构化业务数据；
+- 导入批次记录；
+- 原文件名、文件大小、文件 Hash、MIME Type 等必要元数据；
+- 必要的来源行号、映射状态和错误记录。
+
+不应保留：
+
+- 原始文件 BLOB；
+- 原始文件 Base64；
+- 原文件的长期本地副本；
+- 原文件的 R2 / 对象存储副本；
+- 为成功记录重复保存完整 Raw Row JSON。
+
+文件 Hash 只用于重复导入检测和来源追溯，不代表保存文件本体。
 
 ---
 
@@ -2167,12 +2192,14 @@ Seller Center 财务区域还提供多种结算和参考文件，例如：
 - 报告期间；
 - Report Type；
 - 导入时间；
-- 文件 Hash；
-- 版本；
-- 修正文件；
+- 文件 Hash（仅元数据）；
+- 导入版本；
+- 修正 / 替代关系；
 - 重复导入检测。
 
-不得只按“月份 + 文件名”覆盖旧版本。
+不得用新的导入批次静默覆盖旧导入批次。
+
+原始报告文件只作为解析输入，解析完成后不持久化。
 
 其中：
 
@@ -2198,9 +2225,12 @@ O3Pilot 不应设计一个假定“所有官方报告都是同一种 CSV Schema�
 - Report Type；
 - Parser Version；
 - Header / Schema 校验；
-- 原始文件保存；
+- 结构化导入数据；
+- 导入批次记录；
 - 导入结果；
 - 错误报告。
+
+原始文件本体不持久化。
 
 ---
 
@@ -2330,7 +2360,9 @@ Adapter 状态：`FORMAT TO BE ADAPTERIZED`
 - 计费重量；
 - 账单时间；
 - 原始币种；
-- 原始行。
+- 导入批次；
+- 来源行号；
+- Mapping Status。
 
 正式运行时不读取 Drive 中的样本文件。
 
@@ -2339,9 +2371,11 @@ Adapter 状态：`FORMAT TO BE ADAPTERIZED`
 ```text
 User Upload
 → Logistics Provider Adapter
-→ Raw Import Row
+→ Import Batch / Row Result
 → Seller Logistics Fact
 ```
+
+上传原文件仅用于当次解析，不长期保存；成功记录不重复保存完整原始行 JSON。
 
 具体字段映射在实现 Adapter 前以真实导出 Schema 再验证。
 
@@ -2525,7 +2559,7 @@ In-transit Inventory
 | Rating History | 日期范围 | 可获取当前可用历史区间 |
 | Webhook | 无历史回放保证 | 必须用 Seller API 对账补漏 |
 | Ozon Exchange Rate | 支持 Period 查询；长期稳定性未承诺 | 持久化每日 / 区间历史 |
-| 官方报告 | 取决于 Seller Center 可生成范围 | 人工导入并保留文件版本 |
+| 官方报告 | 取决于 Seller Center 可生成范围 | 人工导入并保留导入批次 / 版本记录 |
 | Settlement / Payout | 依赖 Seller Center 报告保留范围 | 导入后长期保存 |
 | ERP 订单实际采购成本 | 取决于用户 ERP 导出 | 按订单商品长期保存 |
 | Seller Logistics Cost | 取决于物流商账单 / 导出 | 按 Posting / Package 长期保存 |
@@ -3220,7 +3254,7 @@ DATA_SOURCES v1.0 当前正式保留以下待验证项目：
 29. 429 和临时错误可以安全重试；
 30. 400 / 403 等确定性错误不会无限重试；
 31. 空集合不会被无条件解释为业务 0；
-32. Ozon 官方报告导入具有 Report Type 和版本信息；
+32. Ozon 官方报告导入具有 Report Type、导入版本和批次记录，且不持久化原文件；
 33. 卖家自有数据与 Ozon 原始事实物理或逻辑区分；
 34. Ozon Exchange Rate XAPI 具有独立 Read Allowlist、Raw 保存和历史持久化；
 35. Ozon Business FX 与 Seller Cost FX 分离；

@@ -120,12 +120,18 @@ Derived
 
 ### Raw
 
-尽可能原样保存：
+尽可能原样保存自动数据源的原始事实：
 
 - API Response；
-- Webhook Payload；
-- Ozon 官方报告原始文件；
-- ERP 导入原始文件。
+- Webhook Payload。
+
+人工导入文件不属于持久化 Raw Fact。CSV / XLSX 等文件仅作为一次性输入，解析后只保留：
+
+- 导入后的结构化业务数据；
+- 导入批次记录；
+- 必要的逐行处理结果或错误记录。
+
+原始导入文件本体不保存。
 
 ### Normalized
 
@@ -265,8 +271,13 @@ O3Pilot 建议采用以下逻辑数据层。
 
 - `raw_api_response`
 - `raw_webhook_event`
-- `raw_import_file`
-- `raw_import_row`
+
+人工文件导入不保存文件本体，也不以完整 Raw Row 复制原文件内容。人工导入通过：
+
+- `import_batch`
+- `import_row_result`（可选）
+
+记录导入来源、处理结果和追溯信息。
 
 Raw Layer 不承担最终业务查询。
 
@@ -1877,7 +1888,7 @@ settlement_currency
 
 source_system
 source_document_type
-source_import_file_id
+source_import_batch_id
 
 created_at
 updated_at
@@ -1919,7 +1930,7 @@ withheld_amount
 withheld_currency
 
 source_system
-source_import_file_id
+source_import_batch_id
 raw_payload_id
 
 created_at
@@ -2279,7 +2290,6 @@ billed_at
 source_system
 source_import_batch_id
 source_row_number
-raw_row_json
 
 mapping_status
 mapping_version
@@ -3221,20 +3231,29 @@ dedup_fingerprint
 
 ---
 
-# 55. Ozon Official Report Import
+# 55. Manual Import Tracking
 
-## 55.1 `import_file`
+人工导入文件仅作为一次性输入介质。O3Pilot 不持久化 CSV / XLSX 等原文件内容，也不把原文件复制到数据库、R2 或其他长期对象存储。
 
-统一表示用户主动导入的文件。
+持久化对象只包括：
+
+- 导入后的结构化业务数据；
+- 导入批次记录；
+- 必要的逐行处理结果或错误记录。
+
+## 55.1 `import_batch`
+
+代表一次用户上传并解析数据的导入批次，也是人工导入的主要追溯记录。
 
 建议字段：
 
 ```text
-import_file_id
+import_batch_id
 shop_id
 source_system
+source_type
 
-file_name
+original_file_name
 file_hash
 mime_type
 file_size
@@ -3244,57 +3263,47 @@ report_period_from
 report_period_to
 
 parser_version
-imported_at
-status
-```
-
----
-
-## 55.2 `import_batch`
-
-一次文件解析过程。
-
-```text
-import_batch_id
-import_file_id
-shop_id
 started_at
 finished_at
 status
 rows_total
 rows_success
 rows_failed
-parser_version
 error_summary
+
+supersedes_import_batch_id
 ```
+
+其中：
+
+- `original_file_name`、`file_hash`、`mime_type`、`file_size` 只属于导入元数据，不代表保存了文件内容；
+- `file_hash` 可用于重复导入检测；
+- `supersedes_import_batch_id` 可用于表示修正版或替代关系；
+- 不保存文件 BLOB、Base64、持久化文件路径或对象存储 Key。
 
 ---
 
-## 55.3 `import_row`
+## 55.2 `import_row_result`
 
-可选 Raw 行层。
-
-建议用于：
-
-- Ozon Official Reports；
-- ERP；
-- 物流商；
-- Seller Data。
+可选的逐行处理结果，只用于需要定位失败、未匹配或异常行的导入。
 
 字段：
 
 ```text
-import_row_id
+import_row_result_id
 import_batch_id
 source_row_number
-raw_row_json
 parse_status
+mapping_status
 entity_type
 entity_id
+error_code
 error_message
 ```
 
-这样导入数据可以逐行追溯。
+不保存完整 `raw_row_json`。
+
+对于成功导入且业务实体已经保存 `source_import_batch_id + source_row_number` 的记录，可以不额外创建 `import_row_result`，避免重复存储。
 
 ---
 
@@ -3744,7 +3753,7 @@ DELETE FROM campaign
 | Answer | `(shop_id, answer_id)` |
 | Rating History | `(shop_id, rating_code, period_from, period_to)` |
 | Ozon FX | `(from_currency, to_currency, valid_from, valid_to)` |
-| Import File | `file_hash` + import context |
+| Import Batch | `file_hash` + import context |
 
 真正数据库约束需在实现前根据所有真实源字段再次验证。
 
@@ -3814,9 +3823,8 @@ SellerCatalogItem
         ├── WebhookEvent
         ├── DataAvailability
         ├── DataQualityIssue
-        └── ImportFile
-            └── ImportBatch
-                └── ImportRow
+        └── ImportBatch
+            └── ImportRowResult
 
 OzonExchangeRateInterval
 └── MoneyConversion
@@ -4099,9 +4107,8 @@ webhook_event
 
 ozon_exchange_rate_interval
 
-import_file
 import_batch
-import_row
+import_row_result
 
 seller_catalog_item
 seller_catalog_product_mapping
@@ -4332,7 +4339,9 @@ DATA_MODEL 定义：
 
 # 85. 核心原则
 
-**先保存原始事实，再建立业务解释。**
+**自动数据源先保存原始事实，再建立业务解释。**
+
+**人工导入保留导入后的结构化数据和导入记录，不保存原文件本体。**
 
 **内部身份与外部字段分离。**
 
