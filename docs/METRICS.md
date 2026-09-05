@@ -29,12 +29,12 @@
 - API Endpoint、Pagination、真实历史窗口和 Endpoint Verification；
 - 数据库实体、字段、自然键和 Source Lineage Schema；
 - 数据采集频率、Scheduler、Worker、Job 实现；
-- 页面布局和视觉交互；
+- 产品页面/功能结构，以及跨页面视觉语言、通用交互表现与数据呈现；
 - Alert / Recommendation 的业务触发阈值和策略生命周期；
 - Forecast 模型实现；
 - 任何 Ozon 写操作。
 
-这些内容分别由 `DATA_SOURCES.md`、`DATA_MODEL.md`、`ARCHITECTURE.md`、`DESIGN.md`、`ALERTS_AND_RECOMMENDATIONS.md`、`FORECASTING.md` 等对应 Authority 定义。
+其中，产品页面/功能结构由 `PRODUCT.md` 定义，跨页面视觉语言、通用交互表现与数据呈现由 `DESIGN.md` 定义；其余内容仍由 `DATA_SOURCES.md`、`DATA_MODEL.md`、`ARCHITECTURE.md`、`ALERTS_AND_RECOMMENDATIONS.md`、`FORECASTING.md` 等对应 Authority 定义。
 
 O3Pilot 对 Ozon 永久保持只读。
 

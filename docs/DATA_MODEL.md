@@ -31,9 +31,10 @@
 - API 调度周期与 Job 实现；
 - 数据库具体部署产品；
 - Endpoint 当前验证状态、分页与时间窗口细节；
-- 页面结构。
+- 产品页面与导航结构；
+- 跨页面视觉语言、通用交互表现与数据呈现规则。
 
-上述内容分别由 `METRICS.md`、`ARCHITECTURE.md`、`DATA_SOURCES.md`、`DEPLOYMENT.md`、`DESIGN.md` 等文档负责。
+其中，产品页面与导航结构由 `PRODUCT.md` 定义；跨页面视觉语言、通用交互表现与数据呈现规则由 `DESIGN.md` 定义；其余内容仍由 `METRICS.md`、`ARCHITECTURE.md`、`DATA_SOURCES.md`、`DEPLOYMENT.md` 等对应 Authority 定义。
 
 正式原则：
 

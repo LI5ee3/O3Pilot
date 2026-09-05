@@ -30,7 +30,7 @@
 - Metric 公式与口径：由 `METRICS.md` 定义；
 - Session、Secret、认证与密码学：由 `SECURITY.md` 定义；
 - 安装目录、OS 支持矩阵、服务配置与具体 Backup 操作：由 `DEPLOYMENT.md` 定义；
-- 页面、交互和视觉：由 `DESIGN.md` 定义。
+- 产品页面与导航结构：由 `PRODUCT.md` 定义；跨页面视觉语言、通用交互表现与数据呈现：由 `DESIGN.md` 定义。
 
 ---
 
@@ -1184,7 +1184,7 @@ Secret Config 必须额外带 Source / Shop Scope。
 - OS Service environment；
 - 默认端口；
 
-分别由 `DEPLOYMENT.md` / `SECURITY.md` / `DESIGN.md` 负责。
+`UI Settings` 的产品语义由 `PRODUCT.md` 约束，运行时配置语义由 `ARCHITECTURE.md` 约束，安全语义由 `SECURITY.md` 约束，物理 / 运维投影由 `DEPLOYMENT.md` 约束；`DESIGN.md` 仅定义其跨页面视觉语言与通用交互表现。文件位置、Secret Encryption、OS Service environment、默认端口仍分别服从其对应的 Architecture / Security / Deployment Authority。
 
 不在 v1 建立独立的 Configuration Platform、Apply Mode 状态机或每个 Job 的完整 Config Snapshot 平台。
 
@@ -1412,7 +1412,7 @@ Cross-shop Canonical Product Platform without real feature need
 | Runtime architecture | ARCHITECTURE.md |
 | Authentication / Session / Secret / Security | SECURITY.md |
 | OS / paths / installation / backup operations | DEPLOYMENT.md |
-| UI / UX / presentation | DESIGN.md |
+| Cross-page visual language / generic interaction presentation / accessibility-layout treatment | DESIGN.md |
 
 ARCHITECTURE 可以引用这些事实，但不得重新定义第二套业务 Contract。
 

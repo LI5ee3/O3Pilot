@@ -28,7 +28,7 @@ This document does **not** redefine:
 - metric formulas;
 - runtime architecture invariants owned by `ARCHITECTURE.md`;
 - Authentication / Session / Secret / security semantics owned by `SECURITY.md`;
-- UI behavior owned by `DESIGN.md`.
+- UI visual language and generic interaction presentation owned by `DESIGN.md`; operational behavior remains with its owning contract.
 
 The authority rules frozen by B.0.1 are the execution authority. This document only owns the physical / operational projection assigned to DEPLOYMENT.
 
