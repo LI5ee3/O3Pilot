@@ -1,55 +1,51 @@
 # O3Pilot — SECURITY.md
 
-> Version: 1.0  
-> Status: Security Baseline  
-> Updated: 2026-09-03  
-> Applies to: O3Pilot
+> Version: 1.1  
+> Status: B.2 Adjudicated Security Contract  
+> Updated: 2026-09-05  
+> Applies to: O3Pilot  
+> Parent baseline: `9b0cf5a9ea1a1d4e392137606731823b84902c046fd7b8105789482bae86290c`  
+> Authority freeze: `Batch_B.0.1_Authority_Coupling_Freeze.md` @ `08aa0d03a111ec54ce9a177fde3c3ae6b23ae4e2335545d8be502f347e3f524b`
 
-# 1. 文档目的
+# 1. Scope & Authority
 
-`SECURITY.md` 定义 O3Pilot 的正式安全边界、安全控制和安全验收要求。
+`SECURITY.md` defines O3Pilot's canonical security contract:
 
-本文件负责回答：
+- Owner Authentication and Session security;
+- CSRF, browser, Host, proxy and HSTS security;
+- Ozon permanent read-only security controls;
+- Secret / credential cryptographic protection;
+- canonical sensitive-data and log-redaction vocabulary;
+- Webhook / upload / input security;
+- Backup, Recovery Key, R2 and Restore security semantics;
+- outbound, dependency, migration and incident-response security;
+- executable security tests and Security Acceptance.
 
-- O3Pilot 保护哪些资产；
-- 哪些入口、数据源和外部系统属于不可信边界；
-- 单用户登录和单有效 Session 如何实现；
-- 密码、Session、CSRF 和浏览器安全如何处理；
-- Ozon Seller API、Performance API 与其他外部凭证如何保存；
-- O3Pilot 如何从架构上保证永远不主动修改 Ozon；
-- Webhook 如何作为公网不可信输入安全接收；
-- 用户上传的 CSV / XLS / XLSX 等文件如何安全解析；
-- SQLite、Raw Store、日志和本地配置如何保护；
-- Portable Backup、Cloudflare R2 与 Recovery Key 如何保护；
-- Restore、升级、迁移和 Secret Rotation 如何避免泄密或绕过认证；
-- 哪些安全事件必须记录；
-- 哪些安全测试必须在发布前通过；
-- O3Pilot 明确不承诺解决哪些主机级或外部账户级风险。
+This document does **not** redefine:
 
-本文件不重新定义：
+- product capability or Feature Phase;
+- Ozon endpoint reality;
+- data entity / key / schema / lineage;
+- metric formulas;
+- runtime topology and persistent-state architecture;
+- OS installation, service-manager, filesystem, backup-repository or Restore operational procedure;
+- UI behavior.
 
-- 产品能力；
-- Ozon 数据源的业务口径；
-- 数据实体和主键；
-- 指标公式；
-- 数据保留周期；
-- Scheduler / Worker 的调度策略；
-- 安装命令、systemd / launchd 配置细节；
-- UI、导航和页面布局。
+Those concerns remain owned by their frozen authorities. SECURITY may state the minimum security outcome another document must implement, but does not duplicate that document's operational contract.
 
-上述内容分别由 `PRODUCT.md`、`DATA_SOURCES.md`、`DATA_MODEL.md`、`METRICS.md`、`ARCHITECTURE.md`、未来的 `DEPLOYMENT.md` 与 `DESIGN.md` 定义。
+Platform support is not a security-compatibility authority. In particular, SECURITY does not claim WSL is technically incompatible; any v1 WSL exclusion in `DEPLOYMENT.md` is a deployment-scope statement, not security evidence.
 
 ---
 
-# 2. 安全总原则
+# 2. Security Principles & Invariants
 
-O3Pilot v1 的安全基线：
+O3Pilot v1 security baseline:
 
 ```text
 Default Deny
 Read-Only by Architecture
 Single User
-Single Active Session
+Multiple Active Server-side Sessions
 Server-side Authorization
 Least Exposure
 Explicit Trust Boundaries
@@ -64,39 +60,25 @@ Fail Closed
 Security Controls Are Testable
 ```
 
-安全规则不能仅依赖：
+Security must not rely only on:
 
-- 前端隐藏按钮；
-- 用户“不去点击”；
-- Ozon API Key 恰好没有写权限；
-- HTTP Method 是 GET 还是 POST；
-- Cloudflare 已经挡在前面；
-- Webhook Payload 看起来像 Ozon；
-- 上传文件扩展名看起来正确；
-- 数据来自 Ozon 就一定可信；
-- “当前只有一个用户”所以无需认证。
+- hidden frontend controls;
+- user self-restraint;
+- an Ozon credential coincidentally lacking write permission;
+- HTTP Method being GET or POST;
+- Cloudflare being in front;
+- an incoming Webhook looking legitimate;
+- upload filename or MIME appearance;
+- Ozon-sourced data being inherently trustworthy;
+- the product having only one user.
 
-所有核心安全边界必须由服务端执行。
+All core boundaries are enforced server-side.
 
----
+## 2.1 Ozon permanent read-only invariant
 
-# 3. 不可突破的安全不变量
+Even if the user provides credentials with administrative or write capability, O3Pilot must not perform Ozon business mutations.
 
-以下规则属于 O3Pilot v1 Security Invariant。
-
-## 3.1 Ozon 永久只读
-
-即使用户提供：
-
-```text
-Admin API Key
-拥有写接口权限的 Performance Credential
-其他拥有管理能力的 Ozon Credential
-```
-
-O3Pilot 仍不得执行任何 Ozon 业务写操作。
-
-必须同时满足：
+The invariant requires:
 
 ```text
 Default Deny
@@ -109,241 +91,101 @@ Outbound Host Allowlist
 +
 No Arbitrary Endpoint Client
 +
-Automated Security Tests
+Automated Positive + Negative Security Tests
 ```
 
-前端、业务模块和后台 Job 均不能绕过这一层。
+Frontend, API handlers, Workers and Scheduler jobs cannot bypass it.
 
-## 3.2 未认证用户不能读取业务数据
+## 2.2 Authentication and public-surface invariant
 
-除明确列入 Public Surface 的入口外：
+Except for explicitly declared Public Surface:
 
 ```text
 Unauthenticated Request
 → DENY
 ```
 
-不能因为：
+Routing/path/Host/proxy variants must not bypass Authentication or CSRF.
 
-- URL 编码差异；
-- 重复 `/`；
-- 尾部 `/`；
-- 大小写变化；
-- Host Header 异常；
-- Proxy Header 异常；
-- SPA Fallback；
-- 静态资源路由；
+## 2.3 Secret separation invariant
 
-绕过认证。
+SECRET material must not be stored as ordinary business fields, normal config, Raw business payload, Analytics data or plaintext Backup content.
 
-## 3.3 Secret 不进入普通业务数据层
+## 2.4 Backup does not equal credential access
 
-以下内容不得作为普通业务字段存储：
+Possession of Local Backup, a portable Backup Artifact or R2 Backup objects must not automatically yield plaintext Ozon/R2 credentials.
+
+## 2.5 Webhook is not final business truth
+
+Webhook proves receipt of an external event input, not authenticity/completeness/uniqueness/order/final business state. Seller API readback/reconciliation remains the final-state correction path.
+
+---
+
+# 3. Threat Model & Trust Boundaries
+
+Protected assets include:
+
+### Authentication Assets
 
 ```text
-Ozon API Key
+Owner Password verifier
+Session Token / Session verifier
+CSRF state
+server-side Recent Authentication state
+operation-bound high-risk authorization state
+```
+
+### Integration / Recovery Secrets
+
+```text
+Seller API Key
 Performance Client Secret
 Performance Access Token
-R2 Secret Access Key
+R2 Access Credential
 Webhook Endpoint Secret
-Session Token
-CSRF Secret
 Instance Master Key
 Backup Repository Key
 Recovery Key
 ```
 
-业务表可以保存 Secret 的引用、状态、最后验证时间和掩码显示信息，但不能保存明文。
+### Business / Sensitive Data
 
-## 3.4 Backup 文件本身不能等于凭证
+Products, prices, inventory, orders, returns, finance, advertising, ratings, Questions/Answers, seller costs, logistics costs, Profit, Forecast, Raw API/Webhook data and imported business data.
 
-获得：
-
-```text
-Local Backup Repository
-Portable Backup Package
-R2 Bucket Objects
-```
-
-不得自动等价于获得全部 Ozon / R2 Credential。
-
-## 3.5 Webhook 不能直接成为最终业务事实
-
-Webhook 只证明：
-
-```text
-O3Pilot 收到了一条外部事件输入
-```
-
-不自动证明：
-
-```text
-事件来源一定真实
-Payload 一定完整
-事件一定唯一
-事件顺序一定正确
-业务状态已经最终确定
-```
-
-Webhook 负责时效，Seller API Readback / Reconciliation 负责最终状态校准。
-
----
-
-# 4. Threat Model
-
-## 4.1 需要保护的核心资产
-
-### Authentication Assets
-
-- Owner Password Hash；
-- Session；
-- CSRF 状态；
-- 最近认证状态。
-
-### Integration Secrets
-
-- Seller API Client ID / API Key；
-- Performance Client ID / Client Secret；
-- Performance Access Token；
-- R2 Access Credential；
-- Webhook Endpoint Secret；
-- 未来其他第三方凭证。
-
-### Business Data
-
-- 商品；
-- 价格；
-- 库存；
-- 订单；
-- 退货；
-- Finance；
-- 广告；
-- Rating；
-- Questions / Answers；
-- 卖家采购成本；
-- 物流成本；
-- Profit；
-- Forecast；
-- Raw API / Webhook 数据。
-
-### Personal-related Data
-
-可能包括：
-
-- `author_name`；
-- Question / Answer 文本；
-- Chat / Review 文本；
-- 订单与物流接口中能够关联到买家或收货流程的信息；
-- 用户主动导入文件中的个人或业务敏感字段。
+Personal-related data may include `author_name`, Question/Answer text, Chat/Review text and order/logistics fields that can relate to buyer or delivery processes.
 
 ### Recovery Assets
 
-- SQLite Snapshot；
-- Raw Objects；
-- Portable Config；
-- Encrypted Secret Package；
-- Backup Repository Key；
-- Recovery Key；
-- Backup Manifest 与 Integrity Metadata。
+Verified Backup Artifacts, Recovery Envelope, Backup Repository Key, Recovery Key and the metadata required to validate/restore them.
 
-## 4.2 主要攻击面
-
-O3Pilot 至少考虑：
-
-- Internet 对登录入口的密码猜测；
-- 被盗 Session；
-- CSRF；
-- XSS；
-- Clickjacking；
-- Host Header / Proxy Header 混淆；
-- Path Normalization 绕过；
-- 恶意 Webhook；
-- Webhook 重放和重复事件；
-- 恶意或异常上传文件；
-- XLSX ZIP Bomb；
-- Spreadsheet Formula Injection；
-- SQL Injection；
-- SSRF；
-- 外部 API Redirect 导致凭证泄漏；
-- 日志泄密；
-- Backup / R2 泄漏；
-- Dependency / Supply Chain 风险；
-- 主机上其他本地进程读取文件；
-- 浏览器设备被恶意软件控制；
-- Cloudflare / Ozon / R2 Credential 被外部泄漏。
-
-## 4.3 不可完全防御的主机级攻击
-
-如果攻击者已经获得：
+Primary attack surfaces:
 
 ```text
-root
-macOS 管理员级控制
-O3Pilot 运行用户的完整本地会话
-任意读取 O3Pilot 内存的能力
+Login / Session / CSRF
+Public HTTPS / Cloudflare Tunnel boundary
+Ozon / Performance / R2 credentials
+Webhook
+Upload / parser
+Outbound HTTP
+Logs / error paths
+Backup / Restore
+Upgrade / migration
+Dependencies / frontend supply chain
 ```
 
-则应用无法承诺继续保护运行中的明文数据与运行时密钥。
+Host/root compromise cannot be completely prevented by O3Pilot. Security therefore focuses on minimizing exposure, limiting plaintext lifetime, separating keys/credentials and failing closed.
 
-因此 O3Pilot 的目标是：
-
-- 降低单一数据库或单一 Backup 泄漏的影响；
-- 降低普通文件权限错误的风险；
-- 不把 Secret 复制到更多位置；
-- 让离线 Backup 和 R2 泄漏仍保持加密；
-- 明确建议生产主机开启 FileVault / LUKS 等全盘加密。
-
-O3Pilot 不宣传“即使主机完全失陷仍可保护所有数据”。
+Any **new public entry point** requires threat-boundary, authentication, CSRF, Host/proxy and exposure review before release.
 
 ---
 
-# 5. Trust Boundaries
+# 4. Security Data Classification & Canonical Redaction Vocabulary
 
-正式信任边界：
+SECURITY is the canonical owner of security classification and redaction vocabulary.
 
-```text
-Browser
-  ↓ untrusted network input
-Cloudflare Edge
-  ↓
-Cloudflare Tunnel
-  ↓ local transport
-O3Pilot HTTP Boundary
-  ↓ authenticated / validated
-Application
-  ↓
-SQLite / Raw Store / Secret Store
-```
+## 4.1 `SECRET`
 
-外部数据边界：
-
-```text
-Ozon Seller API       ─┐
-Performance API       ─┤
-Exchange Rate API     ─┤
-Ozon Webhook          ─┼→ Untrusted External Data Boundary
-Official Report File  ─┤
-Seller Data File      ─┘
-```
-
-即使来源是官方 API，也必须做：
-
-- Schema Validation；
-- 类型检查；
-- 长度限制；
-- 枚举兼容；
-- 安全输出编码；
-- 错误隔离。
-
----
-
-# 6. Security Data Classification
-
-O3Pilot 使用以下安全分类。
-
-## 6.1 `SECRET`
-
-包括：
+Includes O3Pilot-owned credential/key/token material:
 
 ```text
 Password-derived verifier material
@@ -359,137 +201,154 @@ Backup Repository Key
 Recovery Key
 ```
 
-规则：
+Rules:
 
-- 不写普通日志；
-- 不进入 Analytics；
-- 不进入 Raw API Payload；
-- 不进入普通 Config；
-- 不明文进入 Backup；
-- UI 默认只显示是否已配置和必要掩码；
-- 错误信息不得包含明文。
+- never enter ordinary logs;
+- never enter Analytics;
+- never enter Raw business payload as a credential value;
+- never enter ordinary Config in plaintext;
+- never enter Backup in plaintext;
+- UI exposes only configured state / necessary mask except an explicitly approved one-time reveal;
+- error messages never contain plaintext.
 
-## 6.2 `SENSITIVE`
+## 4.2 `SENSITIVE`
 
-包括：
+Includes business facts, Finance/Profit/costs, buyer communication text, `author_name`, Raw API/Webhook payload, imported business data and internal forecasting/analysis.
 
-- 订单与履约业务事实；
-- Finance；
-- Profit；
-- 卖家成本；
-- 买家沟通文本；
-- `author_name`；
-- Raw API / Webhook Payload；
-- 用户导入的业务数据；
-- 内部经营分析与预测。
+Rules:
 
-规则：
+- authenticated access only;
+- no public cache;
+- no third-party error-reporting body by default;
+- logs contain only minimum necessary identifiers;
+- Backup uses the security protections defined here.
 
-- 仅认证用户可读；
-- 不进入公开缓存；
-- 不进入第三方错误上报正文；
-- 日志只记录最小必要标识；
-- Backup 必须满足本文件的加密要求。
+## 4.3 `INTERNAL`
 
-## 6.3 `INTERNAL`
+Includes non-sensitive runtime config, Dataset/Metric code, schema/format version, Job types, sanitized logs and non-sensitive health state.
 
-包括：
+`INTERNAL` is not automatically Internet-public.
 
-- 非敏感运行配置；
-- Dataset Code；
-- Metric Code；
-- Schema Version；
-- Job 类型；
-- 已脱敏日志；
-- 非敏感健康状态。
+## 4.4 `PUBLIC`
 
-仍不得默认公开到 Internet。
+Only explicitly designed public material such as static frontend resources, the necessary login shell and non-sensitive compatibility metadata.
 
-## 6.4 `PUBLIC`
+Default classification is not `PUBLIC`.
 
-仅包括明确设计为公开的：
+## 4.5 Non-owned external credential material
 
-- 静态前端资源；
-- 必要的登录页面壳；
-- 无敏感信息的版本兼容元数据（若产品需要）。
+A cloudflared / Cloudflare Tunnel connector credential is **not** reclassified as an O3Pilot-owned `SECRET` merely because O3Pilot can encounter the material.
 
-默认分类不是 `PUBLIC`。
+O3Pilot must not:
+
+```text
+read for application use
+persist
+copy
+back up
+migrate
+display
+rotate
+```
+
+that non-owned credential.
+
+If credential material is encountered in logs, error text, diagnostics or command output, it is still a redaction target and must not be emitted in plaintext.
+
+## 4.6 Canonical redaction targets
+
+At minimum, sanitize:
+
+```text
+all SECRET values
+Authorization / credential-bearing headers
+Session / Cookie values
+CSRF secret/token values
+Webhook secret values
+Recovery Key
+credential-bearing query/path/URL material
+non-owned cloudflared/Tunnel credential material
+```
+
+A second document may reference this vocabulary but must not maintain a divergent canonical list.
+
+Any **new third-party notification or Integration** requires classification, secret-storage, outbound-egress and trust-boundary review.
 
 ---
 
-# 7. Owner Authentication
+# 5. Owner Authentication
 
-## 7.1 单用户模型
-
-O3Pilot v1：
+## 5.1 Single-user model
 
 ```text
 Single User
 Single Owner Credential
-Single Active Session
+0..N Active Server-side Sessions
 No Multi-user RBAC
+No Device Identity / Trusted Device Framework
 ```
 
-用户身份不依赖：
+Owner identity does not depend on Ozon login, Cloudflare account login, OS username or browser fingerprint.
 
-- Ozon Seller Account 登录；
-- Cloudflare Account 登录；
-- 本机 OS 用户名；
-- 浏览器指纹。
+## 5.2 Local initialization and bootstrap token
 
-## 7.2 首次初始化
-
-未初始化实例：
+An uninitialized instance has:
 
 ```text
 state = UNINITIALIZED
 ```
 
-正式规则：
+Owner credential may be established only through the trusted local initialization operation defined by `DEPLOYMENT.md`.
 
-- 不允许通过公网匿名页面直接创建 Owner；
-- Owner 初始凭证只能通过本机受信任初始化流程建立；
-- 具体 CLI / 安装流程由 `DEPLOYMENT.md` 定义；
-- 初始化完成后才允许远程登录入口进入正常工作状态。
-
-不得提供：
+If initialization uses a bootstrap token/capability, the canonical security contract is:
 
 ```text
-admin/admin
-固定默认密码
-首次访问任意人可抢占管理员
+CSPRNG entropy >= 256 bits
+raw value delivered only to the local initialization client
+server stores only an irreversible digest/verifier
+accepted only while state = UNINITIALIZED
+accepted only through Loopback / approved local forwarding
+single-use
+maximum lifetime = 15 minutes
+invalidated on successful initialization
+invalidated on service restart
 ```
 
-## 7.3 密码长度与规则
+The literal wire format is not frozen.
 
-v1 未强制 MFA，因此 Owner Password：
+No public anonymous Owner-claim page, fixed default password, `admin/admin`, or first-visitor takeover is allowed.
+
+A change to initialization authentication requires Authentication/Public Surface regression review.
+
+## 5.3 Password requirements
+
+Owner Password:
 
 ```text
 minimum length = 15 characters
 maximum accepted length >= 64 characters
 ```
 
-规则：
+Rules:
 
-- 允许空格；
-- 允许 Unicode；
-- 不要求“大写 + 小写 + 数字 + 特殊字符”组合；
-- 不静默截断；
-- 允许 Password Manager 粘贴；
-- 不要求无原因的周期性强制改密；
-- 如果确认发生泄漏或安全事件，必须要求更换。
+- spaces and Unicode allowed;
+- no arbitrary composition rule requiring upper/lower/digit/symbol;
+- no silent truncation;
+- Password Manager paste allowed;
+- no unjustified periodic forced change;
+- confirmed compromise requires change.
 
-## 7.4 密码 Hash
+## 5.4 Password verifier
 
-Owner Password 永远不使用可逆加密保存。
+Owner Password is never reversibly encrypted.
 
-正式算法：
+Algorithm:
 
 ```text
 Argon2id
 ```
 
-参数至少不低于当前基线：
+Baseline:
 
 ```text
 memory >= 19 MiB
@@ -497,88 +356,127 @@ iterations >= 2
 parallelism >= 1
 ```
 
-实现可以在目标主机基准测试后提高成本，但不得低于安全基线。
+Implementation may raise cost after host benchmarking but may not go below the baseline.
 
-Hash 记录必须包含算法和参数版本，以支持未来 Rehash。
+Verifier state records algorithm/parameter version to support Rehash.
 
-禁止：
+Forbidden:
 
 ```text
+plaintext Password
 SHA-256(password)
-MD5
 SHA-1
-自制 Password Hash
-明文 Password
+MD5
+custom password hashing
 ```
 
-## 7.5 登录限流
+A Password Hash Algorithm change must define rehash/migration behavior and pass Authentication regression tests.
 
-登录入口必须同时具有：
+## 5.5 Login controls and error behavior
 
-- Source-aware Rate Limit；
-- Instance-wide Rate Limit；
-- Progressive Backoff；
-- Authentication Failure Audit。
+Login must have:
 
-不能采用永久锁死 Owner 的设计。
+```text
+source-aware rate limit
+instance-wide rate limit
+progressive backoff
+authentication-failure audit
+```
 
-Cloudflare Rate Limit 可以作为额外防护，但不能替代应用层限制。
+The design must not permanently lock out the Owner.
 
-## 7.6 认证错误信息
+Cloudflare rate limiting is optional defense in depth, not a replacement.
 
-对外统一返回：
+External authentication failure response is normalized, e.g.:
 
 ```text
 Invalid credentials
 ```
 
-不得通过错误差异泄漏：
+It must not disclose Owner existence, password-shape correctness or unnecessary initialization internals.
 
-- Owner 是否存在；
-- Password 是否长度正确；
-- Account 是否已初始化的更多内部细节。
+## 5.6 Password Change
 
-## 7.7 Password Change
+Password Change requires:
 
-修改 Owner Password：
+```text
+valid Session
++
+direct verification of current Owner Password
+```
 
-- 必须已有有效 Session；
-- 必须再次验证当前密码；
-- 成功后撤销全部既有 Session；
-- 旧 Password Hash 不继续保留为有效凭证；
-- 不影响 Backup Recovery Key。
+Success:
 
-## 7.8 Password Reset
+```text
+new verifier becomes authoritative
+old verifier no longer authenticates
+all active Sessions are revoked
+Recovery Key is unchanged
+```
 
-v1 不提供：
+## 5.7 No in-place Password Reset
 
-- 邮件找回密码；
-- 安全问题；
-- 默认后门密码。
+O3Pilot v1 provides no in-place Password Reset capability.
 
-失去密码时，恢复流程依赖对本机实例的受信任 OS 级管理权限。
+No:
 
-具体命令由 `DEPLOYMENT.md` 定义。
+```text
+email password reset
+security questions
+default/backdoor password
+OS-admin command that silently replaces the current Owner verifier
+```
+
+There is no DEPLOYMENT Password Reset command delegation.
+
+Lost-password data recovery is possible only when a suitable external recovery source exists:
+
+```text
+trusted new target instance
+→ local bootstrap
+→ create new target Owner Credential
+→ authenticate/recently re-authenticate target Owner
+→ select verified external Backup Artifact
+→ provide Recovery Key
+→ Restore
+```
+
+`Owner Credential State` is not Portable Business State and is not imported over the target Owner credential.
+
+If the Owner password is lost **and no usable external Backup/recovery source exists**, O3Pilot cannot promise recovery of the protected instance data. This is an explicit residual risk, not an authentication bypass.
 
 ---
 
-# 8. Session Security
+# 6. Session & Recent Authentication
 
-## 8.1 Server-side Session
+## 6.1 Server-side Session
 
-O3Pilot 使用服务端 Session。
+Session Token:
 
-Session Token：
+```text
+CSPRNG >= 256 bits
+```
 
-- 使用 CSPRNG 生成；
-- 至少 256 bit 随机值；
-- 浏览器仅持有 Raw Token；
-- 服务端只保存 Token 的不可逆摘要作为查找值；
-- 不把完整 Session 状态编码成可长期离线使用的客户端 JWT。
+Browser holds the raw token. Server stores only an irreversible token digest/verifier used to locate/validate the Session.
 
-## 8.2 Session Cookie
+O3Pilot does not encode the complete long-lived Session state into a client JWT.
 
-正式 Cookie 属性：
+Server-side Session state includes, as needed:
+
+```text
+session identifier / token digest
+created_at
+last_seen_at
+expires_at
+revoked_at
+reauthenticated_at
+```
+
+The physical database schema is owned by `DATA_MODEL.md`; this list defines required security semantics, not a table freeze.
+
+A Session format/state change must define invalidation/migration behavior and pass Session regression tests.
+
+## 6.2 Session Cookie
 
 ```text
 Name = __Host-o3pilot_session
@@ -589,87 +487,90 @@ Path=/
 No Domain attribute
 ```
 
-不得把 Session 放在：
+Raw Session token must not appear in URL Query/Fragment, LocalStorage, SessionStorage or readable page variables.
 
-- URL Query；
-- URL Fragment；
-- LocalStorage；
-- SessionStorage；
-- 页面可读取 JavaScript 变量。
+## 6.3 Multiple active Sessions
 
-## 8.3 Single Active Session
-
-新登录成功必须在一个原子安全流程中：
+Successful login:
 
 ```text
-Create New Session
-+
-Revoke Previous Active Session
+create one new server-side Session
 ```
 
-旧设备下一次请求必须得到：
+It does **not** revoke unrelated valid Sessions.
+
+Revocation rules:
 
 ```text
-SESSION_REVOKED / Unauthorized
+Logout
+→ revoke current Session
+
+Password Change
+→ revoke all Sessions
+
+Restore
+→ revoke all pre-Restore Sessions
+
+security anomaly
+→ revoke affected Session or all Sessions according to anomaly scope
+
+explicit security-wide invalidation
+→ revoke all Sessions
 ```
 
-## 8.4 Session Rotation
+No in-place Password Reset event exists in v1.
 
-以下事件必须产生新 Session 或撤销旧 Session：
+## 6.4 Session lifetime
 
-- 登录成功；
-- Password Change；
-- Owner Password Reset；
-- Backup Restore；
-- Session 安全状态异常；
-- 明确 Logout。
-
-## 8.5 Session Timeout
-
-v1 默认：
+Default:
 
 ```text
 Idle Timeout = 24 hours
 Absolute Lifetime = 7 days
 ```
 
-实现允许用户缩短，但不能无限期关闭 Session Expiration。
+User may shorten these values. Infinite Session expiration is not allowed.
 
-## 8.6 Recent Authentication
+## 6.5 Recent Authentication
 
-以下高敏感本地操作要求最近重新认证：
+High-risk operations include:
 
-- 修改 Owner Password；
-- 添加 / 修改 / 删除 Integration Credential；
-- 修改 R2 Credential；
-- 生成 / 轮换 Webhook Endpoint Secret；
-- 创建 Portable Export；
-- 执行 Restore；
-- 显示一次性 Recovery 相关敏感信息。
+- Owner Password Change;
+- add/change/delete Integration Credential;
+- change R2 Credential;
+- generate/rotate Webhook Endpoint Secret;
+- create portable Backup/export;
+- Restore;
+- display one-time recovery-sensitive material.
 
-默认 Recent Authentication Window：
+Browser:
+
+```text
+successful Owner Password re-authentication
+→ set server-side Session.reauthenticated_at
+```
+
+Maximum accepted age when a high-risk operation authorization is created:
 
 ```text
 5 minutes
 ```
 
+Implementation may require a fresher re-authentication but v1 does not permit a longer window.
+
+For local CLI Restore, browser Session / browser Recent Authentication state is not inherited. The CLI directly verifies the current Owner Password against the authoritative verifier.
+
+For Restore, successful re-authentication creates only operation-bound authorization state for the exact Restore invocation/source/target. It is not a reusable bearer grant and is invalidated on cancellation, failure or completion.
+
+A long-running already-authorized Restore does not become unauthorized merely because staging/migration exceeds five minutes.
+
 ---
 
-# 9. CSRF 与 Browser Request Security
+# 7. CSRF & Browser Request Security
 
-## 9.1 SameSite 不是唯一 CSRF 防线
+SameSite is defense in depth, not the sole CSRF control.
 
-即使 Session Cookie 使用：
-
-```text
-SameSite=Strict
-```
-
-所有状态改变接口仍必须具备正式 CSRF 防护。
-
-## 9.2 CSRF Token
-
-对基于 Cookie Session 的状态改变请求：
+Cookie-authenticated state-changing methods:
 
 ```text
 POST
@@ -678,165 +579,64 @@ PATCH
 DELETE
 ```
 
-必须使用 Session-bound CSRF Token。
-
-推荐传递方式：
+require a Session-bound CSRF token, preferably in:
 
 ```text
 X-CSRF-Token
 ```
 
-服务端验证 Token 与当前 Session 绑定。
+State-changing requests also validate `Origin`; if absent in an applicable browser scenario, validate `Referer`.
 
-## 9.3 Origin Verification
+Trusted origin comes from O3Pilot configuration, not from an arbitrary unvalidated Host header.
 
-状态改变请求还应验证：
+When `Sec-Fetch-*` is present, reject unreasonable cross-site state changes as an additional control.
 
-```text
-Origin
-```
+Login uses pre-auth CSRF state, Origin/Referer validation, strict Content-Type and login rate limiting.
 
-如果浏览器场景缺少 Origin，再使用：
+Webhook endpoints do not use browser Session/CSRF and instead use their own authentication/validation contract.
 
-```text
-Referer
-```
-
-目标 Origin 必须来自 O3Pilot 受信任配置，不得直接把未验证的 `Host` Header 当作信任来源。
-
-## 9.4 Fetch Metadata
-
-浏览器发送 `Sec-Fetch-*` 时：
-
-- 明确拒绝不合理的 `cross-site` 状态改变请求；
-- 作为纵深防御；
-- 不能替代 CSRF Token 与 Origin Verification。
-
-## 9.5 Login CSRF
-
-登录接口本身也属于安全边界。
-
-登录页面应使用：
-
-- Pre-auth CSRF State；
-- Origin / Referer Validation；
-- 严格 Content-Type；
-- 登录限流。
-
-## 9.6 Webhook 例外
-
-Ozon Webhook：
-
-- 不使用浏览器 Session；
-- 不使用 CSRF Token；
-- 使用独立 Webhook Authentication / Validation Contract。
+Any CSRF strategy change requires CSRF regression coverage.
 
 ---
 
-# 10. HTTP、Host 与 Cloudflare Tunnel Boundary
+# 8. HTTP, Host, Proxy, Browser Headers & HSTS
 
-## 10.1 Loopback Only
+## 8.1 Loopback and canonical origin
 
-O3Pilot 正式监听：
+Application listener:
 
 ```text
 127.0.0.1:<o3pilot-port>
 ```
 
-不得默认监听：
+not default `0.0.0.0`, `::`, LAN or Public address.
 
-```text
-0.0.0.0
-::
-LAN Address
-Public Address
-```
-
-公网访问通过 Cloudflare Tunnel。
-
-## 10.2 Canonical External Origin
-
-O3Pilot 必须拥有明确的：
+Security-sensitive origin logic uses explicitly configured:
 
 ```text
 external_scheme
 external_host
 ```
 
-安全逻辑不得依赖任意请求中的 Host 自动推断。
+rather than arbitrary incoming Host inference.
 
-## 10.3 Host Validation
+## 8.2 Host / proxy / path validation
 
-允许的 Host 至少只能来自：
+Allowed Host comes only from configured public Host and explicitly allowed local access Host.
 
-- 配置的 O3Pilot 公网 Host；
-- 明确允许的本地访问 Host。
-
-其他 Host：
+Unexpected Host:
 
 ```text
 400 / 403
 ```
 
-认证、CSRF、Redirect 和绝对 URL 构建不能基于未经校验的 Host。
+Forwarded / X-Forwarded-* / CF-Connecting-IP are trusted only across the expected local Tunnel/proxy boundary and never bypass Authentication.
 
-## 10.4 Proxy Headers
+Request-path security uses routing-equivalent normalized semantics and tests duplicate slash, trailing slash, encoded slash/dot, `..`, mixed case, query, malformed Host and proxy spoof variants.
 
-`Forwarded`、`X-Forwarded-*`、`CF-Connecting-IP` 等头：
+## 8.3 Browser headers
 
-- 只有在请求确实来自预期本地 Tunnel / Proxy 边界时才可信；
-- 不用于跳过认证；
-- 不用于决定某 API 是否 Public；
-- 来源 IP 主要用于 Rate Limit / Audit，不成为 Owner 身份。
-
-## 10.5 Path Security
-
-安全判断必须使用与路由器一致的规范化 Request Path 语义。
-
-必须测试：
-
-```text
-//
-trailing slash
-%2F
-%2E
-.. segments
-mixed case
-query string
-encoded delimiters
-malformed Host
-```
-
-任何变体均不得导致受保护 Handler 绕过认证 / CSRF。
-
-## 10.6 Cloudflare Access
-
-Cloudflare Access 可以作为公网 UI 的第二层防护。
-
-定位：
-
-```text
-Optional Defense in Depth
-```
-
-不是：
-
-```text
-O3Pilot 应用认证的替代品
-```
-
-即使未配置 Cloudflare Access，O3Pilot 仍必须满足完整 Authentication / Session / CSRF 安全要求。
-
-如果启用 Access：
-
-- Webhook 路由需要单独设计可被 Ozon 到达的策略；
-- 不能为了 Webhook 将整个应用匿名放行。
-
----
-
-# 11. Browser Security Headers
-
-对 Web UI 正式启用：
+Web UI uses:
 
 ```text
 Content-Security-Policy
@@ -845,7 +645,7 @@ Referrer-Policy: no-referrer
 Permissions-Policy
 ```
 
-CSP 至少遵守：
+CSP baseline:
 
 ```text
 default-src 'self'
@@ -854,69 +654,52 @@ base-uri 'none'
 frame-ancestors 'none'
 ```
 
-规则：
+No `unsafe-eval`. External arbitrary CDN script execution is prohibited. Inline script requires nonce/hash rather than blanket `unsafe-inline`.
 
-- 禁止 `unsafe-eval`；
-- JavaScript 不使用任意外部 CDN；
-- 如确需 Inline Script，使用 nonce / hash，不直接开放 `unsafe-inline`；
-- 页面不得被第三方站点 Frame。
-
-对认证页面和业务 API：
+Authenticated pages/business APIs:
 
 ```text
 Cache-Control: no-store
 ```
 
-Hashed Static Assets 可以使用长期 immutable cache。
+Hashed static assets may use immutable caching.
 
-公网 HTTPS 场景应启用 HSTS；具体 Domain Scope 由 `DEPLOYMENT.md` 根据部署域名确定，避免误伤同一主域下其他未使用 HTTPS 的服务。
+## 8.4 HSTS
+
+SECURITY owns HSTS policy. `DEPLOYMENT.md` supplies the actual configured public hostname/context.
+
+For a configured production public HTTPS origin:
+
+```text
+Strict-Transport-Security: max-age=<at least 15552000>
+```
+
+`includeSubDomains` and `preload` are **off by default**. Either may be enabled only after the complete affected domain scope is separately reviewed and known to be HTTPS-safe.
+
+A Cloudflare trust-boundary / public-host / HSTS change requires Host/proxy/HSTS security review.
+
+## 8.5 Cloudflare Access and CORS
+
+Cloudflare Access is optional defense in depth, never a replacement for O3Pilot Authentication/Session/CSRF.
+
+If Access is enabled, Webhook reachability is separately designed; the entire application is not made anonymous merely for Webhook.
+
+Browser API is Same Origin by default. `Access-Control-Allow-Origin: *` with credentialed cookies is forbidden.
 
 ---
 
-# 12. CORS
+# 9. Ozon Read-Only Security Gate
 
-O3Pilot v1 浏览器 API 默认：
-
-```text
-Same Origin Only
-```
-
-禁止：
-
-```text
-Access-Control-Allow-Origin: *
-+
-Credentialed Cookies
-```
-
-除非未来出现正式跨 Origin 产品需求，否则不开放通用 CORS。
-
----
-
-# 13. Ozon Read-Only Security Gate
-
-## 13.1 语义只读，不按 HTTP Method 判断
-
-Ozon Seller API 大量读取接口使用：
-
-```text
-POST
-```
-
-因此：
+Ozon read/write permission is determined by endpoint business semantics, not HTTP method.
 
 ```text
 POST != Write
 GET != Automatically Safe
 ```
 
-O3Pilot 按 Endpoint Contract 的业务语义决定是否允许。
+Seller API, Performance API and other providers use distinct Registries.
 
-## 13.2 Endpoint Registry
-
-Seller API、Performance API、Exchange Rate API 分别维护独立 Registry。
-
-每个允许的外部操作至少定义：
+Allowed external operations define, at minimum:
 
 ```text
 provider
@@ -929,7 +712,7 @@ credential_type
 response_contract
 ```
 
-`semantic_class` 至少包括：
+Security semantic classes include:
 
 ```text
 READ
@@ -937,1421 +720,867 @@ AUTH_BOOTSTRAP
 PROHIBITED_WRITE
 ```
 
-例如 Performance `client_credentials` Token 获取属于 `AUTH_BOOTSTRAP`，不是 Ozon 业务写入。
+Performance `client_credentials` token acquisition may be `AUTH_BOOTSTRAP`; it is not an Ozon business mutation.
 
-## 13.3 Default Deny
-
-任何未注册 Endpoint：
+Unregistered operation:
 
 ```text
 DENY
 ```
 
-不能在业务代码中临时传入任意 Path 绕过 Registry。
+Business modules receive typed approved Gateways, not an arbitrary `request(method,url,headers,payload)` escape hatch.
 
-## 13.4 禁止 Generic Arbitrary Client
+Credential may only be sent to the exact Provider Host assigned to that credential type. Cross-host redirects do not retain credentials unless target Host is independently revalidated.
 
-不得向业务模块暴露：
-
-```text
-request(method, url, headers, payload)
-request(path, arbitrary_body)
-```
-
-形式的 Ozon 万能客户端。
-
-业务模块只能调用：
+Explicitly prohibited Ozon capability families include:
 
 ```text
-Typed Read Gateway
+product create/update/delete
+product-content mutation
+price mutation
+stock mutation
+order/posting fulfillment mutation
+warehouse/delivery configuration mutation
+campaign/bid/budget mutation
+promotion mutation
+Question/Review/Chat send/reply
+Webhook subscription set/update/enable/delete
+any other endpoint changing Ozon server-side business state
 ```
 
-## 13.5 Outbound Host Allowlist
+Credential permission answers what the credential *could* access; the O3Pilot Registry answers what O3Pilot *may* call. Effective ability is the intersection.
 
-Credential 只能发送到对应的精确 Provider Host。
-
-例如：
-
-- Seller Credential 只能发给 Seller API Host；
-- Performance Credential 只能发给 Performance API Host；
-- R2 Credential 只能发给配置的 R2 Endpoint。
-
-外部 HTTP Client：
-
-- 默认不跟随跨 Host Redirect；
-- 如果某协议必须 Redirect，必须重新验证目标 Host；
-- Credential Header 不得在 Redirect 中泄漏到其他 Host。
-
-## 13.6 明确禁止的 Ozon 能力
-
-至少包括：
-
-- 商品 Create / Update / Delete；
-- 商品内容修改；
-- Price Update；
-- Stock Update；
-- Order / Posting 履约写操作；
-- Warehouse / Delivery 配置修改；
-- Campaign / Bid / Budget 修改；
-- Promotion 修改；
-- Question / Review / Chat 发送或回复；
-- Webhook Subscription Set / Update / Enable / Delete；
-- 任何其他改变 Ozon 服务端业务状态的接口。
-
-Webhook `/notification/check` 等可能主动触发外部行为的管理能力在 v1 也默认禁止，除非未来重新进行产品与安全评审。
-
-## 13.7 Credential Permission 不扩大能力
-
-`/v1/roles` 只回答：
-
-```text
-Credential 可以访问什么
-```
-
-O3Pilot Registry 回答：
-
-```text
-O3Pilot 被允许调用什么
-```
-
-二者取交集，不取并集。
+An Ozon allowlist-model change requires positive/negative read-only gate regression tests.
 
 ---
 
-# 14. External Credential Storage
+# 10. Secret & Credential Protection
 
-## 14.1 不保存在哪里
+## 10.1 Storage boundary
 
-Secret 不得保存于：
+O3Pilot-owned secrets are not stored in:
 
-- Git Repository；
-- `.env` 明文文件作为长期正式 Secret Store；
-- 普通 JSON / YAML Config；
-- SQLite 普通业务列明文；
-- Process Command Line；
-- 日志；
-- Crash Dump；
-- Browser Storage。
+```text
+Git
+committed .env
+ordinary JSON/YAML config
+plaintext ordinary business columns
+process command line
+logs
+browser storage
+crash dump by design
+```
 
-环境变量也不作为 O3Pilot 正式长期 Secret Store。
+Environment variables are not the formal long-term O3Pilot Secret Store.
 
-## 14.2 Instance Master Key
+## 10.2 Instance Master Key
 
-O3Pilot 初始化时生成：
+Initialize:
 
 ```text
 instance_master_key = CSPRNG(256 bit)
 ```
 
-用途：
+It protects runtime Integration Secrets and the local copy of Backup Repository Key.
 
-- 加密运行时 Integration Secrets；
-- 保护 Backup Repository Key 的本机副本；
-- 未来保护其他需要后台自动读取的本机 Secret。
+Security requirements:
 
-规则：
+- never stored in SQLite as ordinary data;
+- never in Git;
+- never plaintext in portable Backup;
+- never logged;
+- kept as independent host-local Secret material with access limited to the O3Pilot runtime identity.
 
-- 不进入 SQLite；
-- 不进入 Git；
-- 不明文进入 Portable Backup；
-- 不输出到日志；
-- 存储在独立 Secret File；
-- Secret File Parent Directory 权限 `0700`；
-- Secret File 权限 `0600`；
-- 仅 O3Pilot Runtime User 可读。
+Concrete filesystem location/mode/service injection is owned by `DEPLOYMENT.md`.
 
-macOS Keychain / Linux Secret Service 等能力可以用于额外 Wrap，但不作为跨平台运行必需条件。
-
-## 14.3 Runtime Secret Encryption
-
-运行时 Secret 使用：
+## 10.3 Runtime Secret encryption
 
 ```text
 AES-256-GCM
 ```
 
-每个 Secret：
-
-- 独立随机 Nonce；
-- 使用 CSPRNG；
-- 使用 AAD 绑定上下文。
-
-AAD 至少包含：
+Each Secret uses independent random nonce and AAD binding, including sufficient context such as:
 
 ```text
 instance_id
 secret_type
 shop_id / integration_id
-secret_record_version
+crypto / record version
 ```
 
-这样密文被移动到错误实体时应验证失败。
+Moving ciphertext into a wrong context must fail authentication.
 
-## 14.4 Secret Record
+SECURITY requires persisted encrypted Secret state to retain enough ciphertext, nonce/AEAD context and crypto/version identity for correct decryption and migration. It does not freeze the complete physical database record schema.
 
-数据库只保存类似：
+## 10.4 Access Token
+
+Short-lived access token is memory-first. If crash-recovery persistence is required, use the same encrypted Secret boundary.
+
+Expired token is not historical business data and is not logged.
+
+## 10.5 Rotation
+
+Support rotation for Seller API Key, Performance Client Secret, R2 Credential, Webhook Endpoint Secret and secret-crypto format as applicable.
+
+Safe rotation:
 
 ```text
-secret_id
-secret_type
-integration_id
-ciphertext
-nonce
-crypto_version
-created_at
-rotated_at
-last_verified_at
+validate new material
+→ persist encrypted new material
+→ atomically change active reference
+→ invalidate/remove old active material when safe
 ```
 
-不得保存明文。
+Rotation must not require plaintext historical copies or duplicate deployment lifecycle contracts.
 
-## 14.5 Access Token
-
-Performance Access Token 等短期 Token：
-
-- 优先仅保存在内存；
-- 如因 Crash Recovery 必须持久化，也使用相同 Secret Encryption；
-- 到期后不得作为长期历史数据保存；
-- 不能写入 Debug 日志。
-
-## 14.6 Secret Rotation
-
-必须支持：
-
-- Seller API Key Rotation；
-- Performance Client Secret Rotation；
-- R2 Credential Rotation；
-- Webhook Endpoint Secret Rotation；
-- Instance Secret Crypto Version Migration。
-
-Rotation：
-
-```text
-Validate New Secret
-↓
-Persist Encrypted New Version
-↓
-Switch Active Reference
-↓
-Retire Old Version
-```
-
-不得先删除唯一有效 Secret 再测试新 Secret。
+Changes to Secret Encryption Format or Instance Master Key Format require explicit persisted-crypto migration and regression tests.
 
 ---
 
-# 15. Webhook Security
+# 11. Webhook Security
 
-## 15.1 Webhook 是 Public Surface
+Webhook is a Public Surface and is untrusted input.
 
-Webhook 接收端是少数无需 Owner Session 的公网入口。
+Until an officially verified cryptographic signature contract exists, the current authentication boundary uses an independent high-entropy Webhook Endpoint Secret as bearer-secret protection.
 
-因此必须与普通 `/api/*` 路由隔离。
+O3Pilot does not claim unverified Ozon signature semantics.
 
-## 15.2 当前来源鉴别边界
-
-当前 O3Pilot 基线尚未建立“经过真实验证的 Ozon Webhook Cryptographic Signature Contract”。
-
-因此 v1 不得虚构：
-
-- Ozon 一定发送某个签名 Header；
-- 某个未验证字段可以证明来源；
-- IP Allowlist 可以永久代表 Ozon 来源。
-
-在官方签名机制被真实验证前，v1 使用独立的高熵 Webhook Endpoint Secret 作为来源鉴别的 Bearer Secret。
-
-## 15.3 Webhook Endpoint Secret
-
-生成：
+Endpoint requirements:
 
 ```text
-CSPRNG >= 256 bit
+secret comparison performed safely
+strict body-size limit
+strict JSON/content validation
+unknown/invalid event handled safely
+idempotency/replay handling
+acknowledgement separated from asynchronous processing
+no direct irreversible business mutation from raw event
+no Secret logging
 ```
 
-建议编码为 URL-safe Token。
+Webhook readback/reconciliation remains necessary for final business state.
 
-规则：
-
-- 仅首次创建时显示完整 URL；
-- 服务端只持久化 Token Hash / Verifier；
-- 日志永远对该 Path Segment 脱敏；
-- 泄漏后必须支持 Rotation；
-- Webhook Secret 与 Owner Session / CSRF / Ozon API Key 完全独立。
-
-## 15.4 Request Validation
-
-Webhook 接收入口至少验证：
-
-- Secret；
-- HTTP Method；
-- Content-Type；
-- Body Size；
-- JSON Parse；
-- 顶层 Schema；
-- `message_type` / Event Type；
-- 字段类型；
-- 单字段最大长度；
-- 当前允许的 Shop / Integration Mapping。
-
-未知字段可以进入 Raw，但不能触发任意代码路径。
-
-## 15.5 Body Size
-
-Webhook 必须在读取完整 Body 前执行请求大小上限。
-
-超过上限：
-
-```text
-413 Payload Too Large
-```
-
-上限由真实 Payload 样本验证后调整，但不能无限制读取。
-
-## 15.6 Idempotency 与 Replay
-
-因为真实重复推送行为尚未验证，O3Pilot 默认按“可能重复”设计。
-
-至少生成：
-
-```text
-request_fingerprint
-received_at
-shop_scope
-event_type
-```
-
-如果 Ozon 提供稳定 Event ID，则优先使用官方 Event ID；否则使用经过定义的 Fingerprint 做重复检测辅助。
-
-重复检测不能误删合法的两次相似业务事件，因此最终状态仍由 API Readback 校准。
-
-## 15.7 Ack 与处理分离
-
-Webhook HTTP Handler：
-
-```text
-Authenticate
-Validate
-Persist Raw Event
-Create / Coalesce Job
-Return
-```
-
-不得在公网请求事务中执行长时间同步或大规模重算。
-
-## 15.8 No Direct Business Mutation
-
-Webhook 不直接：
-
-- 覆盖订单最终事实；
-- 删除业务对象；
-- 改写库存真值；
-- 改写 Finance 真值；
-- 触发 Ozon 写操作。
+A Webhook Authentication mechanism change requires dedicated security regression tests.
 
 ---
 
-# 16. Upload / Import Security
+# 12. Upload, Input, SQL & Output Safety
 
-## 16.1 文件不是可信数据源
+Uploaded CSV/XLS/XLSX is untrusted input.
 
-即使文件由用户自己上传，也按不可信输入处理。
-
-## 16.2 Format Allowlist
-
-每个 Import Contract 必须显式声明允许格式。
-
-例如：
+Requirements:
 
 ```text
-CSV
-XLS
-XLSX
+explicit format allowlist
+do not trust extension or MIME alone
+file-size / row / cell / archive limits
+macro/embedded executable content never executed
+parser failure fails safely
+temporary upload removed after processing/failure
+formula-injection-safe export behavior
 ```
 
-不能因为文件扩展名存在就自动选择任意解析器。
+New upload format requires parser/allowlist/resource-limit security review before support.
 
-## 16.3 不信任 MIME 与扩展名
+SQL:
 
-至少同时检查：
+- parameterized queries;
+- no user-supplied raw SQL execution;
+- dynamic identifiers require explicit allowlist.
 
-- Extension；
-- MIME；
-- Magic / File Signature（适用时）；
-- Parser 是否能以预期格式打开。
+XSS:
 
-## 16.4 File Size / Row / Archive Limits
+- framework/contextual escaping;
+- no unsafe business-text HTML injection;
+- CSP remains defense in depth.
 
-每个 Import Contract 都必须定义：
+SSRF/outbound:
 
-```text
-max_upload_bytes
-max_rows
-max_columns
-max_cell_length
-max_archive_entries
-max_inflated_bytes
-```
-
-XLSX 属于 ZIP 容器，必须防止 ZIP Bomb。
-
-## 16.5 临时文件
-
-上传文件只进入受控 Temp Area：
-
-- 位于 Web Root 之外；
-- 使用随机内部文件名；
-- 不使用用户原始文件名作为实际 Path；
-- 权限仅 Runtime User 可读；
-- 成功和失败都必须清理；
-- 不长期复制到 R2。
-
-这与 `DATA_SOURCES.md` 的“一次性导入介质”规则一致。
-
-## 16.6 禁止执行文件内容
-
-O3Pilot 永远不：
-
-- 执行 Excel Macro；
-- 执行 Embedded Script；
-- 运行上传的二进制文件；
-- 启动 Office / LibreOffice 来“打开”上传文件；
-- 自动访问 Workbook External Link；
-- 计算不受信任 Formula 作为代码。
-
-## 16.7 Formula Injection
-
-如果未来导出 CSV / XLSX，来自 Ozon 或用户输入的字符串以：
-
-```text
-=
-+
--
-@
-```
-
-等公式触发字符开始时，必须使用安全导出策略，避免文件被电子表格程序解释为恶意公式。
-
-## 16.8 Parser Failure
-
-解析失败：
-
-- 不产生部分“成功”业务事实，除非 Import Contract 明确支持逐行事务；
-- 错误信息不得回显整个敏感行；
-- 原文件按生命周期清理。
+- external URLs come from provider configuration/allowlist, not arbitrary payload;
+- redirect target is revalidated;
+- credentials are not forwarded to unapproved hosts.
 
 ---
 
-# 17. Input、SQL 与 Output Safety
+# 13. Local Data, Privacy, Logging & Security Audit
 
-## 17.1 SQL
+## 13.1 Local protection outcome
 
-数据库访问必须使用参数化 Query。
+Runtime identity and physical persistent-directory/file permissions are implemented by `DEPLOYMENT.md`.
 
-禁止：
+SECURITY requires the result:
 
 ```text
-SQL = "..." + user_input
+runtime does not run as root
+business data is not world-readable
+Secret/sensitive files are access-restricted
+primary SQLite/Raw protection is not weakened by backup/log/temp handling
 ```
 
-动态：
+Concrete path or POSIX mode is a Deployment implementation detail unless a security test requires a minimum equivalent protection.
 
-- Sort Field；
-- Order；
-- Column；
-- Filter Operator；
+## 13.2 Data minimization / privacy
 
-必须来自显式 Allowlist，不能作为绑定参数无法覆盖的 SQL 结构直接拼接用户值。
+Do not create unnecessary duplicate copies of personal/sensitive business text.
 
-## 17.2 XSS
+UI and third-party notifications expose the minimum needed data. Third-party notification payload must not silently include SECRET or unnecessary SENSITIVE content.
 
-任何来自：
+## 13.3 Logging / error sanitization
 
-- Ozon；
-- Webhook；
-- Question / Answer；
-- Product Name；
-- 用户导入；
-- 外部错误信息；
+Never log canonical redaction targets from §4.6.
 
-的字符串都按不可信文本处理。
+Business-body logging is minimized and off by default for SENSITIVE payloads.
 
-默认使用框架 HTML Escape。
+Errors are sanitized before persistent logging or UI display.
 
-如未来需要渲染 HTML / Rich Content，必须使用独立 Sanitization Contract，不允许直接 `innerHTML`。
+## 13.4 Security Audit minimum
 
-## 17.3 SSRF
+Audit at least security-relevant events:
 
-O3Pilot 不自动 Fetch 外部数据中出现的任意 URL。
+```text
+successful / failed Login
+Session creation / revocation / expiry anomalies as needed
+Password Change
+read-allowlist / prohibited-endpoint denial
+outbound-host denial
+Integration credential add/change/delete/verification failure
+Webhook secret rotation / authentication failure
+upload rejection of security relevance
+Backup create/verify security failure
+Restore authorization / start / success / failure
+Recovery Key / Recovery Envelope security operation
+crypto/secret migration
+security-wide Session invalidation
+```
 
-例如：
+There is no Password Reset audit event in v1 because there is no in-place Password Reset capability.
 
-- 商品图片 URL；
-- 用户导入 URL；
-- Webhook Payload URL；
-- Question Text 中的 URL。
+The two denial axes remain semantically distinct:
 
-需要服务器主动访问网络的功能必须拥有自己的 Outbound Host / Protocol Contract。
+```text
+Ozon read/prohibited-capability denial
+Outbound host/credential isolation denial
+```
 
-禁止请求：
-
-- localhost；
-- private network；
-- link-local metadata；
-- arbitrary file://；
-
-除非属于明确内部系统设计。
+Audit itself must not contain raw SECRET.
 
 ---
 
-# 18. Local Data Protection
+# 14. Backup Security & Recovery Key
 
-## 18.1 Runtime User
+This section defines security semantics for the canonical Backup Artifact owned operationally by `DEPLOYMENT.md`.
 
-O3Pilot 正式运行时不应以 `root` 身份运行。
+## 14.1 Confidentiality and key separation
 
-安装过程如果需要更高 OS 权限，运行时仍应使用普通受限用户。
+Backup must provide confidentiality and integrity before leaving the host.
 
-## 18.2 Persistent Directory
-
-包含：
-
-- SQLite；
-- WAL；
-- Raw Store；
-- Local Backup；
-- Config；
-- Secret File；
-
-的目录默认：
+Use a random:
 
 ```text
-0700
+Backup Repository Key = CSPRNG(256 bit)
 ```
 
-敏感文件默认：
+to protect Backup objects. Host runtime holds a locally protected copy under `instance_master_key`.
+
+Independent:
 
 ```text
-0600
+Recovery Key = CSPRNG(256 bit)
 ```
 
-## 18.3 SQLite
+Recovery Key is:
 
-SQLite 仍是正式 Primary Database。
+- independent from Owner Password;
+- independent from Instance Master Key;
+- not normal config;
+- not uploaded to R2;
+- not logged;
+- intended to be stored off-host by the user.
 
-Security v1 不要求引入 SQLCipher 作为运行依赖。
+Losing both Recovery Key and usable trusted recovery material can make encrypted Backup unrecoverable.
 
-原因：
-
-- Secret 已使用应用层加密；
-- 一般业务数据使用文件权限和主机全盘加密保护；
-- SQLCipher 会引入新的原生依赖与恢复复杂度，应由未来独立架构决策评估。
-
-生产环境强烈建议：
-
-```text
-macOS FileVault
-Linux LUKS / equivalent full-disk encryption
-```
-
-## 18.4 Raw Store
-
-Raw Store 可能包含比 Normalized 表更多的原始信息。
-
-因此：
-
-- 权限不得低于 SQLite；
-- 不放在 Web Root；
-- 不提供任意文件下载 Path；
-- UI 读取 Raw 必须经过认证和明确业务接口；
-- 日志不能复制 Raw Payload。
-
----
-
-# 19. Data Minimization 与 Privacy
-
-## 19.1 不重复制造个人数据副本
-
-对于 `author_name`、Question / Answer Text 等字段：
-
-- Raw Fact 可按数据架构保留；
-- Normalized / Read Model 只保存业务功能真正需要的字段；
-- 不为搜索、日志、告警方便而复制完整文本到更多表；
-- 不默认把个人相关文本放入通知消息。
-
-## 19.2 UI 最小暴露
-
-页面只展示完成当前业务任务需要的信息。
-
-例如不需要完整个人相关文本时，不因为 API 有字段就全部展示。
-
-## 19.3 第三方通知
-
-未来 O3Pilot 自身的 DingTalk / Email / Webhook 等提醒如果启用：
-
-- 默认只发送必要摘要；
-- 不发送 Ozon API Key；
-- 不发送完整 Buyer Text；
-- 不发送完整 Finance Raw Payload；
-- 不发送 Recovery Secret。
-
----
-
-# 20. Logging 与 Security Audit
-
-## 20.1 永不记录的内容
-
-普通日志和 Audit 均禁止记录：
-
-```text
-Password
-Session Token
-Cookie Header
-CSRF Token
-Ozon API Key
-Performance Client Secret
-Performance Access Token
-R2 Secret Access Key
-Webhook Endpoint Secret
-Instance Master Key
-Backup Repository Key
-Recovery Key
-完整 Authorization Header
-```
-
-## 20.2 默认不记录的业务正文
-
-除专门诊断模式且经过额外脱敏外，默认不记录：
-
-- Question / Answer 全文；
-- Chat / Review 全文；
-- 完整 Order Raw Payload；
-- 完整 Finance Raw Payload；
-- 上传文件完整行内容。
-
-## 20.3 Error Sanitization
-
-第三方 API 错误可能包含：
-
-- Request ID；
-- Path；
-- Payload 片段；
-- Header；
-
-写日志前必须经过 Sanitizer。
-
-HTTP Client Debug Mode 不得直接打印完整 Request / Response Headers。
-
-## 20.4 Security Audit Events
-
-至少记录：
-
-- Login Success；
-- Login Failure；
-- Session Revoked；
-- Logout；
-- Password Changed / Reset；
-- Integration Secret Created / Rotated / Removed；
-- Credential Validation Failure；
-- Read Allowlist Denial；
-- Outbound Host Denial；
-- Webhook Authentication Failure；
-- Webhook Oversize / Invalid Schema；
-- Import Rejected；
-- Backup Started / Verified / Failed；
-- R2 Replication Verified / Failed；
-- Restore Started / Verified / Failed；
-- Security-sensitive Config Change；
-- Application Upgrade / Migration Result。
-
-Audit 只记录：
-
-- 内部对象 ID；
-- Event Type；
-- 时间；
-- 结果；
-- 必要 Source Metadata；
-
-而不是 Secret。
-
-## 20.5 Audit Integrity Boundary
-
-v1 本地 Audit 不是不可篡改外部审计系统。
-
-拥有主机管理员权限的人仍可能修改本地日志。
-
-O3Pilot 不把本地 Audit 宣传成法证级不可抵赖日志。
-
----
-
-# 21. Portable Backup Security
-
-## 21.1 Backup Confidentiality
-
-Portable Backup 不只保护 Secret。
-
-因为 Backup 还包含：
-
-- Finance；
-- 订单；
-- Raw Data；
-- 成本；
-- 买家相关文本；
-
-因此 O3Pilot v1 正式要求：
-
-```text
-Portable Backup Data = Client-side Encrypted
-```
-
-不仅依赖 R2 自身 Server-side Encryption。
-
-## 21.2 Backup Repository Key
-
-初始化时生成：
-
-```text
-backup_repository_key = CSPRNG(256 bit)
-```
-
-用途：
-
-- 加密 Backup DB Snapshot；
-- 加密 Raw Object；
-- 加密 Portable Config；
-- 加密 Backup Manifest；
-- 加密 Portable Secret State。
-
-本机运行副本使用 `instance_master_key` 加密保存。
-
-## 21.3 Recovery Key
-
-同时生成独立：
-
-```text
-recovery_key = CSPRNG(256 bit)
-```
-
-Recovery Key：
-
-- 与 Owner Password 独立；
-- 与 Instance Master Key 独立；
-- 不作为普通配置保存；
-- 不上传到 R2；
-- 不写日志；
-- 应由用户保存在 O3Pilot 主机之外，例如 Password Manager / 离线安全介质。
-
-O3Pilot 不承诺在 Recovery Key 丢失且原主机也不可用时还能恢复加密 Backup。
-
-## 21.4 Recovery Envelope
-
-为了让自动 Backup 不需要每次输入 Recovery Key：
+## 14.2 Recovery Envelope
 
 ```text
 Recovery Key
-   ↓ derive KEK
-Encrypt Backup Repository Key
-   ↓
-Recovery Envelope
+→ standard KDF / KEK
+→ wraps Backup Repository Key
+→ Recovery Envelope
 ```
 
-Recovery Envelope 可以安全保存在 Backup Repository。
+Recovery Key is high-entropy random material, not a human password.
 
-恢复到新主机时：
+KDF uses a reviewed construction such as HKDF-SHA-256 with independent salt/context (Repository identity / format identity as applicable).
 
-```text
-User supplies Recovery Key
-↓
-Decrypt Backup Repository Key
-↓
-Decrypt Backup Objects
-↓
-Create New Host Instance Master Key
-↓
-Re-encrypt Runtime Secrets for New Host
-```
+Do not reuse raw Recovery Key bytes directly as unrelated cryptographic keys.
 
-## 21.5 Backup Encryption
+## 14.3 Backup encryption
 
-Backup Object 正式使用：
+Backup object encryption:
 
 ```text
 AES-256-GCM
 ```
 
-要求：
+Requirements:
 
-- 每个对象独立随机 Nonce；
-- 禁止 Nonce Reuse；
-- AAD 绑定 Repository / Object / Format Version；
-- 任何 Authentication Tag 验证失败都必须 Fail Closed。
+- independent random nonce per object;
+- no nonce reuse;
+- AAD binds repository/object/format context;
+- authentication-tag failure is Fail Closed.
 
-## 21.6 Backup Manifest
+Backup Manifest is encrypted because it can reveal sensitive structure.
 
-Manifest 本身包含敏感业务结构信息，因此默认同样加密。
-
-允许保留最小无敏感 Plaintext Envelope Header，例如：
+A minimal non-sensitive plaintext envelope may expose only fields necessary to select crypto/format handling, e.g.:
 
 ```text
 backup_format_version
 cipher_suite
 ```
 
-不得在明文 Header 中放：
+No Shop name, Client ID, order data, secret metadata or source-host paths in plaintext envelope.
 
-- Shop Name；
-- Client ID；
-- 订单信息；
-- Secret Metadata；
-- 文件原始路径。
+## 14.4 Integrity
 
-## 21.7 Integrity
+Verification covers, as applicable:
 
-Backup Verification 同时验证：
+```text
+AEAD authentication
+object length
+object identity
+required object presence
+Manifest references
+SQLite integrity
+config / schema / format compatibility
+```
 
-- AEAD Authentication；
-- Object Length；
-- Object Identity；
-- SQLite Integrity；
-- Required Object Presence；
-- Manifest Reference；
-- Config / Schema Compatibility。
+Checksum alone does not replace AEAD authentication.
 
-单独的 Checksum 不替代 AEAD Authentication。
+## 14.5 Optional Integration Secret inclusion
 
-## 21.8 不包含 Portable Secrets 的备份
+A Backup may intentionally exclude Integration Secrets.
 
-如果用户明确选择不把 Integration Secrets 纳入 Portable Backup，则允许生成仅包含业务数据、Raw、Config 和必要完整性元数据的 Backup。
-
-这种 Backup 必须显式标记：
+Such Backup is explicitly marked:
 
 ```text
 DATA_COMPLETE_BUT_CREDENTIALS_REQUIRED
 ```
 
-Restore 后不得把缺失的 Integration Credential 解释为“已恢复”。
-
-对应集成必须处于：
+Restored integrations remain:
 
 ```text
 CREDENTIALS_REQUIRED
 ```
 
-直到用户重新提供并完成验证。
+until credentials are newly provided/validated.
 
-## 21.9 Recovery Key Derivation
+Owner Credential State is not portable and is never included as an overwriteable restored Owner credential.
 
-`recovery_key` 是随机 256-bit Secret，不是低熵用户密码。
+## 14.6 Recovery Key / Repository Key rotation
 
-Recovery Envelope 的 KEK 应通过经过审查的标准 KDF 从 Recovery Key 派生，例如：
+Recovery Key suspected leak:
 
 ```text
-HKDF-SHA-256
+generate new Recovery Key
+→ re-wrap Backup Repository Key
+→ verify new Recovery Envelope
+→ invalidate old Envelope
 ```
 
-并绑定独立随机 Salt、Repository ID 与 Format Version。
+Historical Backup objects need not all be re-encrypted unless the Repository Key itself is compromised.
 
-不得直接把 Recovery Key 字节复用为多个不同密码学用途的 Key。
+Repository Key compromise requires a new Repository Key and migration/re-encryption strategy for retained data.
 
-首次生成或 Rotation 后，Recovery Key 只在明确的 Recovery Setup 流程中向用户完整展示，并要求用户在主机之外保存。
+Changes to Backup Encryption Format or Recovery Key/Envelope Format require explicit compatibility/migration behavior and Backup/Restore regression tests.
 
 ---
 
-# 22. Cloudflare R2 Security
+# 15. Cloudflare R2 Security
 
-## 22.1 R2 Role
+Operational R2 role lives in `DEPLOYMENT.md §12.2`.
 
-R2 仅是：
+SECURITY requires:
 
 ```text
-Optional Off-device Backup Replica
+R2 = optional private off-device encrypted Backup replica
+not primary database/filesystem/secret store
 ```
 
-不是：
+Backup is client-side encrypted **before** upload. R2-at-rest encryption is only defense in depth.
 
-- Runtime Database；
-- Live Filesystem；
-- Primary Secret Store；
-- Public Download Bucket。
+Bucket:
 
-## 22.2 Client-side Encryption First
+- Private by default;
+- no public Backup bucket/custom-domain exposure;
+- least-privilege credential;
+- no Cloudflare Global API Key reuse;
+- no frontend storage of R2 credential.
 
-上传 R2 前：
+R2 credential may be part of portable encrypted Integration Secret state if explicitly included. But new-host R2 recovery still requires a separately supplied Bucket-access bootstrap credential.
 
 ```text
-Plain Backup Object
-↓ local encryption
-Ciphertext
-↓ HTTPS
-R2
+Recovery Key != R2 Authentication Credential
 ```
 
-R2 自身的 Encryption at Rest 是额外纵深防御，不替代 O3Pilot Client-side Encryption。
+R2 credential leak should not reveal plaintext Backup, but may enable deletion/tampering/availability attacks. Local verified Backup and remote replica are independent resilience states.
 
-## 22.3 Bucket Access
+---
 
-R2 Bucket：
+# 16. Restore Security
 
-- 默认 Private；
-- 禁止 Public Bucket / Public Custom Domain 暴露 Backup；
-- Credential 只授予 O3Pilot Backup 所需最小 Scope；
-- 不复用 Cloudflare Global API Key；
-- 不在前端保存 R2 Credential。
+There is one canonical SECURITY Restore contract. `DEPLOYMENT.md §15` owns the operational sequence and consumes this contract.
 
-R2 Credential 本身可以作为 Portable Encrypted Secret 的一部分保存，以便恢复后继续使用原有 R2 配置。
+No second umbrella Restore-authorization vocabulary is introduced.
 
-但从 R2 启动一次“新主机远程恢复”时，用户仍必须先通过独立方式提供能够读取该 Private Bucket 的 Bootstrap Credential。
+## 16.1 Authorization and operation binding
+
+Restore requires valid current Owner authorization on the target instance.
+
+Browser:
 
 ```text
+Owner Password re-auth
+→ Session.reauthenticated_at
+→ create operation-bound Restore authorization state
+```
+
+CLI:
+
+```text
+direct verification of current Owner Password
+→ create process-local operation-bound Restore authorization state
+```
+
+Authorization state is bound to:
+
+```text
+Restore operation identity
+selected Backup/source identity
+target instance
+```
+
+It is not a reusable bearer grant and is invalidated on cancellation/failure/completion.
+
+Recent Authentication age at creation is at most five minutes. A Restore already authorized does not expire solely because staging/migration runs longer.
+
+## 16.2 Required independent checks
+
+Restore security requires all of:
+
+```text
+current Owner authorization
+explicit Backup/source selection
+Recovery Key verification
+Backup integrity verification
+format/schema compatibility
+required recoverable point before destructive replacement
+explicit destructive confirmation in the Deployment operation
+```
+
+Roles remain distinct:
+
+```text
+Owner Password / Recent Authentication
+= authorize operation
+
 Recovery Key
-!=
-R2 Authentication Credential
+= unlock Backup cryptographic material
+
+trusted OS management privilege
+= local machine control / bootstrap environment
+!= Owner authentication on an initialized instance
+
+R2 Bootstrap Credential
+= access private R2 Bucket
+!= Owner authentication
+!= Recovery Key
 ```
 
-Recovery Key 负责解锁 Backup Ciphertext，不负责取得 R2 Bucket 的访问权限。
+## 16.3 Session and Owner state after Restore
 
-## 22.4 R2 Credential Failure
+All pre-Restore Sessions are revoked.
 
-R2 Credential 泄漏不应直接暴露明文 Backup 数据，因为 R2 对象仍应为 O3Pilot 密文。
+Session state is never Portable Business State.
 
-但攻击者可能：
+Owner Credential State is not Portable Business State and does not overwrite the target Owner credential.
 
-- 删除对象；
-- 篡改对象；
-- 阻止恢复。
-
-因此本地 Verified Backup 与 R2 Replica 是独立状态，不能只保留唯一 R2 副本。
-
----
-
-# 23. Restore Security
-
-## 23.1 Restore 是高敏感操作
-
-Restore 必须：
-
-- 最近重新认证；
-- 明确选择 Backup；
-- 验证 Recovery Key；
-- 验证 Backup Integrity；
-- 验证 Format / Schema Compatibility；
-- 在替换当前状态前保留可恢复点。
-
-## 23.2 Restore 后 Session
-
-Restore 后：
+Cross-host ordering therefore is:
 
 ```text
-All Previous Sessions = REVOKED
+install target
+→ local bootstrap
+→ create target Owner Credential
+→ authenticate / recently re-authenticate target Owner
+→ select Backup
+→ provide Recovery Key
+→ Restore
 ```
 
-包括 Backup 创建时存在的旧 Session。
+## 16.4 Cross-host Secret rewrap
 
-Session 不能作为 Portable Business State 恢复。
+Cross-host Restore:
 
-## 23.3 Secret Rewrap
+```text
+generate new target instance_master_key
+→ decrypt portable Secret state
+→ re-protect Secret state under target-host key material
+```
 
-新主机 Restore：
+Old host-local master key is never transplanted.
 
-- 生成新的 `instance_master_key`；
-- 解密 Portable Secret State；
-- 使用新主机 Master Key 重新加密；
-- 不把旧主机 Local Master Key 复制过来。
+## 16.5 Decrypted temporary material
 
-## 23.4 Restore Temp Data
+Decrypted temporary Restore material must:
 
-解密后的临时文件：
+```text
+be access-restricted
+never enter logs
+be removed on success
+be removed on failure
+exist in plaintext for the minimum practical lifetime
+```
 
-- 使用受限 Temp Directory；
-- 权限 `0600`；
-- 不进入日志；
-- 成功和失败都清理；
-- 尽量缩短明文存在时间。
+Concrete temp path/mode is owned by `DEPLOYMENT.md`.
 
-## 23.5 Failed Restore
+## 16.6 Failed Restore
 
-错误 Recovery Key、对象篡改、Manifest 不一致或 SQLite Integrity 失败：
+Wrong Recovery Key, object tamper, Manifest inconsistency, AEAD failure or SQLite integrity failure:
 
 ```text
 Fail Closed
 ```
 
-不得“尽量恢复一部分然后继续运行”并把状态标记为正常。
+Partial failed Restore must not be promoted or marked normal.
+
+Persistent/security format incompatibility must not be guessed around or silently reinterpreted.
 
 ---
 
-# 24. Backup / Recovery Key Rotation
+# 17. Background Jobs & Outbound Network Security
 
-如果 Recovery Key 疑似泄漏：
+Worker/Scheduler/API share the same security boundaries.
 
-1. 在可信运行实例上生成新的 Recovery Key；
-2. 使用新的 Recovery Key 重新 Wrap Backup Repository Key；
-3. 验证新的 Recovery Envelope；
-4. 使旧 Recovery Envelope 失效；
-5. 不要求重新加密所有历史 Backup Object，除非 Backup Repository Key 本身也疑似泄漏。
+Background Job must not:
 
-如果 Backup Repository Key 泄漏：
+- bypass Ozon Endpoint Registry;
+- accept arbitrary URL/SQL/Endpoint injection through Job payload;
+- persist plaintext SECRET in payload/error;
+- bypass Owner Authentication/CSRF on administrative retry/control API;
+- retain/use a pre-Restore Session after Restore.
 
-- 必须生成新 Repository Key；
-- 新 Backup Repository 使用新 Key；
-- 需要保留的旧数据按迁移策略重新加密；
-- 仅轮换 Recovery Envelope 不足以解决问题。
-
----
-
-# 25. Security of Background Jobs
-
-Worker / Scheduler 与前端 API 共享同一安全边界。
-
-后台 Job：
-
-- 不能绕过 Ozon Endpoint Registry；
-- 不能从 Job Payload 注入任意 URL / SQL / Endpoint；
-- Job Payload 不保存 Secret 明文；
-- 重试错误不把 Secret 写入 `error_message`；
-- Job Admin / Retry API 仍需要 Owner Authentication + CSRF；
-- Restore 后旧 Job 不得携带可继续使用的旧 Session Token。
-
----
-
-# 26. Outbound Network Security
-
-## 26.1 Provider Isolation
-
-每个 Gateway 拥有自己的：
-
-- Host Allowlist；
-- Credential Type；
-- Timeout；
-- Retry Policy；
-- TLS Requirement。
-
-## 26.2 TLS
-
-对外 API：
+Each external provider Gateway has its own:
 
 ```text
-HTTPS Required
-Certificate Verification Required
+Host Allowlist
+Credential Type
+TLS Requirement
+Timeout
+Retry policy
 ```
 
-禁止在正式运行中：
+External API requires HTTPS with certificate verification.
+
+Production must not use:
 
 ```text
 verify_tls = false
 ```
 
-## 26.3 Timeout
-
-所有外部请求必须设置：
-
-- Connect Timeout；
-- Read Timeout；
-- Total / Job Deadline。
-
-避免恶意或异常外部服务无限占用 Worker。
+All external requests have connect/read/overall deadlines.
 
 ---
 
-# 27. Dependency 与 Supply Chain
+# 18. Dependency & Supply Chain Security
 
-## 27.1 依赖最小化
+Minimize unnecessary framework plugins, crypto libraries, parsers and background services.
 
-不为方便引入不必要的：
+Do not implement custom AES, Argon2, random generator, MAC/JWT/password hash/signature primitives when mature reviewed libraries exist.
 
-- Web Framework Plugin；
-- Crypto Library；
-- Parser；
-- Background Service；
+Production dependencies resolve reproducibly to known versions. Dependency upgrade includes release/security-note review, automated tests and security regression; production startup does not dynamically pull an unknown newest dependency.
 
-安全相关能力优先使用成熟、广泛审计的标准实现。
+Frontend runtime does not execute arbitrary third-party CDN scripts. Production JS/CSS/icon assets are served by O3Pilot unless a separately reviewed dependency contract says otherwise.
 
-## 27.2 Crypto
-
-禁止自行实现：
-
-- AES；
-- Argon2；
-- Random Generator；
-- JWT / MAC；
-- Password Hash；
-- Signature Algorithm。
-
-使用成熟库。
-
-## 27.3 Version Pinning
-
-生产依赖必须可重复解析到确定版本。
-
-升级依赖前：
-
-- 读取 Release / Security Notes；
-- 执行 Tests；
-- 执行 Security Regression；
-- 不在生产启动时自动下载未知最新版本。
-
-## 27.4 Frontend Supply Chain
-
-前端运行时不依赖任意第三方 CDN 执行脚本。
-
-业务页面的 JavaScript / CSS / Icon 等正式资源由 O3Pilot 自身提供。
+Known critical dependency vulnerability without mitigation blocks release.
 
 ---
 
-# 28. Upgrade 与 Migration Security
+# 19. Upgrade, Security-state Migration & Incident Response
 
-## 28.1 Upgrade 前 Backup
+## 19.1 Upgrade / migration
 
-涉及：
+Pre-upgrade Backup operation is owned by `ARCHITECTURE.md` / `DEPLOYMENT.md`; SECURITY requires it before an upgrade that can modify security-sensitive persistent state.
 
-- Schema；
-- Raw Format；
-- Secret Format；
-- Backup Format；
-- Config Format；
+Secret/security-state migration:
 
-的升级必须遵守 `ARCHITECTURE.md` 的 Pre-upgrade Backup Contract。
+- no long-lived plaintext temporary copy;
+- crash-aware;
+- new format verified before old encrypted state is retired;
+- failure leaves a recoverable state;
+- old version must refuse unsupported new security/schema formats rather than silently overwrite.
 
-## 28.2 Secret Migration
+**Independent migration invariant:**
 
-Secret Migration：
+> Persisted security / cryptographic format changes require an explicit Migration; old ciphertext or persisted security state must never be silently reinterpreted.
 
-- 不产生长期明文临时副本；
-- Crash-safe；
-- 成功验证新格式后才删除旧密文；
-- 失败时保持旧版本仍可恢复。
+This applies to Password verifier format, Session/security state format, Secret encryption, Instance Master Key wrapping, Backup encryption, Recovery Envelope and other persisted security formats.
 
-## 28.3 Downgrade
+## 19.2 Incident response
 
-旧版本应用不得在不理解新 Secret / Schema Format 时静默覆盖数据。
-
-不兼容：
+### Owner Password suspected compromise
 
 ```text
-Refuse to Start / Refuse to Migrate
+change Owner Password
+→ revoke all Sessions
+→ review Login / Session audit
+→ if browser/host compromise is also plausible, rotate affected Integration Secrets
 ```
 
-优于猜测性降级。
+### Ozon API Key leak
+
+User revokes/rotates in Ozon, then updates/verifies O3Pilot credential. O3Pilot does not call Ozon write endpoints to “repair” state.
+
+### Performance Secret leak
+
+Revoke old Client Secret, configure new Secret, clear old Access Token and obtain a new token.
+
+### Webhook Endpoint Secret leak
+
+Generate new endpoint Secret; user performs any required Ozon-side Webhook URL change manually. Old Secret is invalidated. O3Pilot does not modify Ozon Webhook subscription.
+
+### R2 Credential leak
+
+Rotate R2 credential, verify local Backup and remote object integrity. R2 ciphertext does not imply plaintext exposure if Backup keys remain secret.
+
+### Recovery Key leak
+
+Rotate Recovery Envelope/Recovery Key as defined in §14.6.
+
+### Instance-wide security incident
+
+When incident scope cannot safely be limited to one Session, revoke **all** active Sessions. There is no single-session assumption.
 
 ---
 
-# 29. Security Incident Response
+# 20. Mandatory Security Tests
 
-至少支持以下事件类型。
+Formal Release includes at least the following.
 
-## 29.1 Owner Password Suspected Compromise
+## 20.1 Authentication / Session / initialization
 
-- 修改 Password；
-- 撤销当前 Session；
-- 检查 Login Audit；
-- 如浏览器或主机也可疑，轮换 Integration Secrets。
+- unauthenticated Protected API → reject;
+- one successful login does **not** revoke unrelated valid Sessions;
+- Logout invalidates current Session;
+- Password Change invalidates all Sessions;
+- expired Session invalidates;
+- raw Session Token absent from DB/log;
+- server stores token digest/verifier;
+- initialization token is UNINITIALIZED-only, Loopback/local-forwarding-only, single-use, ≤15 min, digest-only server-side and invalidated on success/restart;
+- no in-place Password Reset endpoint/CLI/authentication backdoor;
+- Recent Authentication >5 min cannot establish a new sensitive-operation authorization;
+- CLI sensitive operation does not inherit browser reauth state.
 
-## 29.2 Ozon API Key Leak
+## 20.2 Path / Host / CSRF / HSTS
 
-- 用户在 Ozon 侧撤销 / 轮换 Key；
-- O3Pilot 更新 Secret；
-- 验证新 Key；
-- 检查是否存在异常 API 访问；
-- O3Pilot 自身不尝试调用 Ozon 写接口“修复”状态。
+Test malformed Host, duplicate/encoded path variants, proxy spoof and same-origin/cross-origin CSRF behavior.
 
-## 29.3 Performance Secret Leak
+Configured public HTTPS origin emits HSTS with required minimum max-age. `includeSubDomains`/`preload` are absent unless explicitly reviewed/enabled.
 
-- 撤销旧 Client Secret；
-- 配置新 Secret；
-- 清除内存 Access Token；
-- 重新获取 Token。
+A Cloudflare trust-boundary/HSTS change requires regression coverage.
 
-## 29.4 Webhook Secret Leak
+## 20.3 Ozon read-only
 
-- 生成新 Endpoint Secret；
-- 用户在 Ozon 侧手工更新 Webhook URL；
-- 验证自然事件或受控连通性；
-- 旧 Secret 失效。
+- unregistered Endpoint → reject;
+- prohibited write Endpoint → reject;
+- no arbitrary Ozon URL from business module;
+- Seller credential never sent to Performance host;
+- redirect to unapproved host does not receive credentials;
+- even Admin-role credential cannot make write path reachable.
 
-O3Pilot 不自动修改 Ozon Webhook Subscription。
+## 20.4 Webhook
 
-## 29.5 R2 Credential Leak
+Wrong/missing Secret rejected; oversized body rejected; invalid JSON safely rejected; unknown event safely quarantined/handled; duplicate event causes no repeated irreversible mutation; Secret absent from logs.
 
-- 轮换 R2 Credential；
-- 检查 Bucket Object 完整性；
-- 验证 Local Backup；
-- 如果 Backup Repository Key 未泄漏，R2 中业务数据仍应保持 O3Pilot 密文。
+Webhook Authentication changes require this regression suite.
 
-## 29.6 Recovery Key Leak
+## 20.5 Upload / parser
 
-按第 24 章轮换 Recovery Envelope。
+Fake extension, bad MIME/content, corrupt XLSX, archive bomb, oversized cells/rows, macro/embedded content, Formula Injection export and parser-crash temp cleanup.
 
----
+Any newly supported upload format must pass the same parser/limit/threat review.
 
-# 30. Mandatory Security Tests
+## 20.6 Secret / redaction
 
-正式 Release 前至少执行以下测试。
+- known O3Pilot SECRET plaintext absent from DB ordinary fields/config/log/Backup;
+- wrong Instance Master Key cannot decrypt;
+- tampered ciphertext fails AEAD;
+- canonical redaction catches SECRET values and credential-bearing headers/tokens/URLs;
+- cloudflared/Tunnel credential material, if synthetically injected into diagnostics/error output, is redacted and not persisted/backed up.
 
-## 30.1 Authentication
+Secret Encryption / Master Key format changes require migration regression.
 
-- 未登录访问所有 Protected API → 401/403；
-- 新登录撤销旧 Session；
-- Logout 后旧 Token 立即失效；
-- Password Change 后旧 Session 失效；
-- Expired Session 失效；
-- Raw Session Token 不出现在数据库和日志。
+## 20.7 Backup / R2 / Restore
 
-## 30.2 Path / Host Regression
+- Backup business plaintext not directly exposed;
+- SECRET plaintext absent;
+- wrong Recovery Key → fail;
+- tampered/missing object → fail;
+- R2 stores ciphertext;
+- all pre-Restore Sessions invalid after Restore;
+- cross-host Restore creates new target master key and does not transplant old local key;
+- Owner Credential State is not imported;
+- target Owner must authenticate before Restore authorization;
+- Recovery Key alone cannot authorize Restore;
+- operation authorization binds exact source/target and is not reusable;
+- decrypted temp material is restricted, not logged and cleaned on success/failure;
+- failed Restore cannot promote partial state.
 
-测试：
+Backup Encryption / Recovery Envelope format changes require explicit compatibility/migration testing.
 
-```text
-malformed Host
-duplicate slash
-encoded slash
-encoded dot
-trailing slash
-query string
-mixed case
-proxy header spoof
-```
+## 20.8 Audit / outbound / dependency
 
-不能绕过 Auth / CSRF。
+Verify both Ozon read/prohibited-capability denial and outbound-host denial remain observable.
 
-## 30.3 CSRF
+No credential follows an unapproved cross-host redirect.
 
-- 缺失 CSRF Token → reject；
-- 错误 Token → reject；
-- Cross-origin State Change → reject；
-- Valid Same-origin + Valid Token → pass；
-- Webhook 不错误依赖浏览器 CSRF。
-
-## 30.4 Ozon Read-only Gate
-
-- 未注册 Endpoint → reject；
-- Prohibited Write Endpoint → reject；
-- Business Module 无法构造任意 Ozon URL；
-- Seller Credential 不会发送给 Performance Host；
-- Redirect 到非 Allowlist Host 时 Credential 不泄漏；
-- 即使测试 Credential 返回 Admin Role，Write Endpoint 仍不可达。
-
-## 30.5 Webhook
-
-- 错误 Secret → reject；
-- 无 Secret → reject；
-- Oversize Body → 413；
-- Invalid JSON → reject；
-- Unknown Event → quarantined / handled safely；
-- Duplicate Event 不导致重复不可逆业务动作；
-- Secret 不出现在日志。
-
-## 30.6 Upload
-
-- 假扩展名；
-- 错 MIME；
-- Corrupt XLSX；
-- ZIP Bomb；
-- 超大 Cell；
-- 超大 Row Count；
-- Macro / Embedded Content；
-- Formula Injection export case；
-- Parser Crash 后 Temp File 清理。
-
-## 30.7 Secret Storage
-
-- 数据库中搜索已知 Secret 明文 → 不存在；
-- Config 中搜索 → 不存在；
-- Log 中搜索 → 不存在；
-- 错误 `instance_master_key` 无法解密 Secret；
-- 密文被篡改 → AEAD 验证失败。
-
-## 30.8 Backup
-
-- Backup 中搜索已知业务明文 → 不应直接出现；
-- Backup 中搜索已知 Secret 明文 → 不存在；
-- Wrong Recovery Key → fail；
-- Tampered Object → fail；
-- Missing Object → fail；
-- R2 只保存 Ciphertext；
-- Restore 后旧 Session 全部失效；
-- Restore 到另一台支持的 Mac / Linux 后 Integration Secret 可授权恢复。
-
-## 30.9 Logging
-
-自动扫描日志，确认不存在：
-
-- API Key；
-- Client Secret；
-- Access Token；
-- Cookie；
-- Recovery Key；
-- Webhook Secret。
+Critical dependency finding without mitigation blocks release.
 
 ---
 
-# 31. Security Acceptance Gate
+# 21. Security Acceptance Gate
 
-任何下列问题存在时，不得发布为正式版本：
+Release is blocked by any of:
 
 ```text
 Authentication Bypass
 CSRF Bypass
+Public initialization takeover
+Single-Session residue that revokes unrelated Sessions on login
 Ozon Write Path Reachable
 Secret Plaintext in DB / Log / Backup
+Canonical Redaction Gap
 Arbitrary Outbound URL with Credential
-Unbounded Public Upload
+Unbounded / unsafe public upload
 Webhook Secret Leakage
 Backup Integrity Not Verifiable
+Recovery Key accepted as Owner authentication
+Restore not bound to current Owner authorization
 Restore Keeps Old Session Valid
+Cross-host Restore transplants old local master key
+Restore temp plaintext leak / failed cleanup
+Persisted security format silently reinterpreted
 Known Critical Dependency Vulnerability without Mitigation
 ```
 
-High Severity Security Finding 默认阻止 Release。
+High Severity Security Finding blocks Release by default.
 
-如果因特殊原因接受残余风险，必须：
+Accepted residual risk requires:
 
-- 有明确 Finding ID；
-- 说明影响；
-- 说明临时缓解；
-- 说明修复计划；
-- 不能用“理论上没人会这样做”作为接受理由。
+```text
+Finding ID
+impact
+temporary mitigation
+remediation plan
+```
+
+“theoretically nobody will do this” is not mitigation.
+
+Security-impact changes must update the owning security section/tests, not a parallel security-version wrapper.
+
+Change categories requiring explicit security regression/coverage include:
+
+- Password Hash Algorithm;
+- Session Format/state;
+- CSRF Strategy;
+- Secret Encryption Format;
+- Instance Master Key Format;
+- Backup Encryption Format;
+- Recovery Key / Envelope Format;
+- Webhook Authentication;
+- Ozon Endpoint Allowlist Model;
+- Cloudflare Trust Boundary / HSTS scope;
+- any new public entry point;
+- any new upload format;
+- any new third-party notification / Integration.
+
+General release/change history remains **Project Version + CHANGELOG**. There is no parallel Security Version numbering system.
 
 ---
 
-# 32. 明确禁止的实现方式
+# 22. Explicitly Prohibited Implementations
 
-禁止：
+Forbidden:
 
 ```text
-把 Ozon API Key 写进源码
-把 Secret 写进 .env 后提交
-把 Session 放 LocalStorage
-使用明文 Password
-使用 SHA-256 直接 Hash Password
-信任任意 Host Header
-依赖前端判断权限
-把 Cloudflare Access 当作唯一认证
-把 SameSite 当作唯一 CSRF 防护
-使用万能 Ozon request(url, payload)
-跟随任意 Redirect 并保留 Authorization
-自动 Fetch 外部 Payload 中任意 URL
-执行上传 Excel Macro
-长期保存用户上传原文件
-把 Raw Payload 全量写 Debug Log
-把 Backup 明文上传 R2
-把 Recovery Key 保存到同一个 Backup
-Restore 后继续接受旧 Session
-为了测试调用 Ozon 写接口
+Ozon API Key in source code
+committed plaintext Secret .env
+Session token in LocalStorage
+plaintext Password
+direct SHA-256 password hashing
+trust arbitrary Host Header
+frontend-only authorization
+Cloudflare Access as sole authentication
+SameSite as sole CSRF defense
+generic arbitrary Ozon request(url,payload)
+follow arbitrary redirects while retaining Authorization
+fetch arbitrary URL from external payload
+execute uploaded Excel macro
+retain uploaded original file indefinitely
+dump full Raw payload into Debug log
+upload plaintext Backup to R2
+store Recovery Key inside the same Backup
+treat Recovery Key as Owner authentication
+Restore while accepting pre-Restore Sessions
+portable Owner Credential State overwrite
+bypass integrity/compatibility for Restore
+test Ozon write capability by actually mutating Ozon
 ```
 
 ---
 
-# 33. Residual Risk
+# 23. Residual Risk & Implementation Boundary
 
-即使满足本文件，仍存在以下残余风险。
+Even with this contract, residual risks remain.
 
-## 33.1 Ozon Credential 本身权限过大
+## 23.1 Over-privileged external Ozon credential
 
-O3Pilot 可以保证自己不调用写接口，但如果同一个 Admin API Key 在 O3Pilot 之外泄漏，攻击者仍可能直接调用 Ozon 写接口。
+O3Pilot can guarantee its own write path is unreachable, but cannot stop a leaked Admin credential from being used outside O3Pilot.
 
-因此如果 Ozon 支持更小权限 Credential，用户应优先使用最小只读权限。
+Use least-privilege Ozon credential where available; O3Pilot security does not depend on it.
 
-但 O3Pilot 的安全不能依赖这一点。
+## 23.2 Browser / device compromise
 
-## 33.2 Browser / Device Compromise
+Malware fully controlling an authenticated browser/device can act with that Session's read authority and may observe business data.
 
-用户已经登录的浏览器被恶意软件完全控制时，攻击者可能以当前 Session 权限读取业务数据。
+## 23.3 Host full compromise
 
-## 33.3 Host Full Compromise
+An attacker with sufficient host/root/runtime-memory control can ultimately access runtime plaintext Secret material.
 
-拥有 Runtime User / root 内存和文件访问权限的攻击者最终可能获得运行时明文 Secret。
+## 23.4 Webhook authenticity
 
-## 33.4 Webhook Authenticity
+Until a verified Ozon cryptographic signature contract is available, Webhook Endpoint Secret is bearer-secret authentication, not public-key origin proof.
 
-在 Ozon 官方 Cryptographic Signature Contract 被真实验证前，Webhook Endpoint Secret 是 Bearer Secret，不具备公钥签名级别的来源证明。
+## 23.5 Cloudflare account compromise
 
-## 33.5 Cloudflare Account Compromise
+Compromise may affect Tunnel, DNS, R2 availability and routing. Client-side Backup encryption reduces plaintext exposure but cannot prevent remote deletion/denial.
 
-Cloudflare Account 被控制可能影响：
+## 23.6 Lost Owner password without recovery source
 
-- Tunnel；
-- DNS；
-- R2 可用性；
-- 公网流量路由。
-
-O3Pilot Client-side Backup Encryption 可以降低 R2 数据明文泄漏风险，但不能防止攻击者删除远程对象。
-
----
-
-# 34. Security Versioning
-
-以下变化必须更新 `SECURITY.md` 或关联 Security Contract Version：
-
-- Password Hash Algorithm；
-- Session Format；
-- CSRF Strategy；
-- Secret Encryption Format；
-- Instance Master Key Format；
-- Backup Encryption Format；
-- Recovery Key / Envelope Format；
-- Webhook Authentication 方式；
-- Ozon Endpoint Allowlist Model；
-- Cloudflare Trust Boundary；
-- 支持新的公开入口；
-- 支持新的文件上传格式；
-- 支持新的第三方通知或 Integration。
-
-安全格式变化必须具有明确 Migration，不允许静默重新解释旧密文。
-
----
-
-# 35. 本版参考基线
-
-本版 Security Contract 基于当前 O3Pilot 正式基线：
+Because v1 intentionally has no in-place Password Reset/backdoor:
 
 ```text
-PRODUCT.md v1.0
-DATA_SOURCES.md v1.0
-DATA_MODEL.md v1.0
-METRICS.md v1.0
-ARCHITECTURE.md v1.0
+lost Owner password
++
+no usable external verified Backup / recovery source
+=
+protected instance data may be unrecoverable through supported O3Pilot recovery
 ```
 
-并结合当前开发参考资料中已经确认的事实：
+This is an explicit consequence of the authentication boundary.
 
-- Seller API Key 可能拥有 Admin 与大量写接口权限；
-- O3Pilot 仍必须永久只读；
-- Seller API 不能按 GET / POST 简单判断读写；
-- Performance API 使用独立 Client Credential 与短期 Bearer Token；
-- Question / Answer 可能包含 `author_name` 与用户文本；
-- Webhook 真实 Payload、重试、顺序和重复行为仍存在未验证边界；
-- Portable Backup 必须能够跨受支持 Mac / Linux 主机恢复；
-- R2 是可选 Off-device Replica，而不是 Primary Database。
+## 23.7 Implementation boundary
 
-安全实现参考当前主流 Web 安全与密码学实践，包括：
+This document defines the intended v1 Security Contract. Some controls may still require implementation work.
 
-- Argon2id Password Hash；
-- Server-side Session；
-- Secure / HttpOnly / SameSite Cookie；
-- CSRF Token + Origin Validation；
-- CSP 与安全响应头；
-- Authenticated Encryption；
-- Secret / Key Separation；
-- 文件上传 Allowlist 与资源限制；
-- 日志 Secret Redaction。
+Physical installation/service/path operations belong to `DEPLOYMENT.md`; runtime/persistent-state architecture belongs to `ARCHITECTURE.md`.
 
----
-
-# 36. 核心原则
-
-**O3Pilot 对 Ozon 的只读边界必须由代码结构强制，而不是由用户自律。**
-
-**API Key 的权限上限不等于 O3Pilot 的权限上限。**
-
-**所有公网输入默认不可信。**
-
-**所有 Secret 默认不记录、不公开、不明文备份。**
-
-**Backup 的可恢复性不能以牺牲凭证机密性为代价。**
-
-**R2 可以增强离机耐久性，但不能成为明文数据仓库。**
-
-**没有经过验证的安全机制，不写成已经存在。**
-
-**安全失败优先 Fail Closed。**
-
-**安全规则必须能够自动测试。**
+A retained security rule must have a clear security reason, one canonical authority and testable value. Historical wording is not itself a reason to preserve a rule.

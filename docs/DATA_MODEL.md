@@ -1,39 +1,51 @@
 # O3Pilot — DATA_MODEL.md
 
-> Version: 1.0  
+> Version: 1.1  
 > Status: Data Model Baseline  
-> Updated: 2026-09-03  
+> Updated: 2026-09-04  
+> Revision: Batch A.2  
 > Applies to: O3Pilot
+
+---
 
 # 1. 文档目的
 
-`DATA_MODEL.md` 定义 O3Pilot 的统一业务数据模型。
+`DATA_MODEL.md` 定义 O3Pilot 的统一业务数据模型与持久化身份边界。
 
 本文件负责回答：
 
-- O3Pilot 有哪些正式业务实体；
-- 每个实体的身份如何确定；
-- Ozon 原始技术字段如何保存；
-- 不同接口中的同一业务对象如何关联；
-- 多店铺如何隔离；
-- 商品、订单、库存、履约、退货、Finance、广告、Rating 等对象如何建立关系；
-- 原始事实、标准化事实和派生结果如何分层；
-- 币种、汇率和金额转换如何保存；
-- 卖家采购成本如何进入订单级利润模型；
-- 数据来源、版本和计算过程如何追溯；
-- 未知、无权限、未匹配、未验证等状态如何与真实 `0` 区分。
+- 当前阶段有哪些正式 Normalized 业务实体；
+- 每个实体的业务身份如何确定；
+- 自然业务键如何由数据库强制唯一；
+- 自动来源 Raw Capture 如何追溯；
+- JSON 字段何时可以作为结构化业务快照保留；
+- 多店铺、商品、订单、库存、履约、退货、Analytics、Rating 等对象如何建立关系；
+- Raw、Normalized、Derived 如何分层；
+- 未知、无权限、未匹配、未验证如何与真实 `0` 区分；
+- 哪些未来阶段模型当前只保留 Acquisition / Deferred 边界，而不提前冻结完整 Schema。
 
 本文件不定义：
 
 - 指标最终计算公式；
-- 产品退货率公式；
-- Profit 具体公式；
-- Forecast 算法；
-- 页面结构；
-- API 调度周期；
-- 数据库具体产品和部署方案。
+- Profit / Forecast / Recommendation 的最终模型；
+- API 调度周期与 Job 实现；
+- 数据库具体部署产品；
+- Endpoint 当前验证状态、分页与时间窗口细节；
+- 页面结构。
 
-上述内容分别进入 `METRICS.md`、`ARCHITECTURE.md`、`DESIGN.md` 等文档。
+上述内容分别由 `METRICS.md`、`ARCHITECTURE.md`、`DATA_SOURCES.md`、`DEPLOYMENT.md`、`DESIGN.md` 等文档负责。
+
+正式原则：
+
+```text
+Data Acquisition Phase
+!=
+Normalized Phase
+!=
+Feature Phase
+```
+
+未来 Feature 所需的不可回补 Raw Data 可以提前采集，但不能因此提前冻结未来阶段的完整 Normalized Schema。
 
 ---
 
@@ -51,64 +63,32 @@
 product_id = 123
 ```
 
-本身不能作为 O3Pilot 内部全局主键。
+本身不能作为 O3Pilot 内部全局业务身份。
 
-正确身份至少应包含：
-
-```text
-shop_id + product_id
-```
+正确身份至少应包含 Shop Scope。
 
 ---
 
-## 2.2 Internal ID 与 Source Key 分离
+## 2.2 Internal ID 逐实体裁决
 
-每个核心实体拥有 O3Pilot 自己生成的内部 ID。
+O3Pilot 不建立“所有核心实体都必须拥有 Internal ID”或“所有表统一包含 `id`”的全局规则。
 
-例如：
+Internal ID 与自然业务身份逐实体裁决：
 
-```text
-shop_id
-product_id_internal
-mother_order_id
-posting_id
-posting_item_id
-return_case_id
-finance_accrual_id_internal
-campaign_id_internal
-```
+- `product`：保留 `product_id_internal`，同时强制 `(shop_id, ozon_product_id)` 唯一；
+- `mother_order`：业务身份为 `(shop_id, order_number)`，不强制 Surrogate ID；
+- `posting`：业务身份为 `(shop_id, posting_number)`，不强制 Surrogate ID；
+- `posting_item`：保留内部身份，因为当前没有经过验证的可靠外部自然键能唯一定位 Posting 内商品行；
+- `raw_capture`、`sync_run`、`import_batch`：属于 O3Pilot 自身技术记录，使用内部 ID；
+- Future Finance / Advertising / Questions / Inbound Supply：在对应 Normalized Phase 到来前不提前裁决最终 Internal ID Strategy。
 
-同时保留 Ozon 或其他来源提供的业务标识：
-
-```text
-ozon_product_id
-sku
-offer_id
-order_number
-posting_number
-return_id
-accrual_id
-campaign_id
-```
-
-O3Pilot 内部关系优先使用内部 ID。
-
-来源字段用于：
-
-- 同步；
-- 去重；
-- 跨接口匹配；
-- 对账；
-- 用户展示；
-- 原始事实追溯。
+Source Key 继续原样保留，用于同步、去重、跨接口匹配、对账、展示和追溯。
 
 ---
 
 ## 2.3 Raw Fact 与 Business Fact 分离
 
-O3Pilot 不直接把某个 API 字段解释成最终业务事实。
-
-数据至少分为三层：
+数据逻辑分层：
 
 ```text
 Raw
@@ -120,51 +100,34 @@ Derived
 
 ### Raw
 
-尽可能原样保存自动数据源的原始事实：
+自动来源 API / Webhook 的原始字节正文进入不可变 Content-addressed Raw Store；SQLite 只保存 `raw_capture` metadata。
 
-- API Response；
-- Webhook Payload。
+人工 CSV / XLS / XLSX 不属于长期 Raw Store，只作为一次性 Import Medium：
 
-人工导入文件不属于持久化 Raw Fact。CSV / XLSX 等文件仅作为一次性输入，解析后只保留：
-
-- 导入后的结构化业务数据；
-- 导入批次记录；
-- 必要的逐行处理结果或错误记录。
-
-原始导入文件本体不保存。
+```text
+Upload
+→ Staging
+→ Validate
+→ Parse
+→ Persist structured facts + lineage
+→ Delete source file
+```
 
 ### Normalized
 
-建立统一实体和统一字段，例如：
-
-- Shop；
-- Product；
-- MotherOrder；
-- Posting；
-- ReturnCase；
-- FinanceAccrual；
-- AdCampaign。
+只为当前 Normalized Phase 已进入的业务域建立稳定业务事实，例如 Shop、Product、Posting、Return、Analytics Daily、Rating。
 
 ### Derived
 
-建立可重新计算的结果，例如：
+保存可重新计算的 Metric、Alert 等结果。Profit、Forecast、Recommendation 等模型只在对应 Phase 进入后建立。
 
-- 库存覆盖天数；
-- 产品退货率；
-- Profit；
-- Forecast；
-- Alert；
-- Recommendation。
-
-派生结果不能覆盖原始事实。
+Derived 永远不能覆盖 Source Fact。
 
 ---
 
 ## 2.4 技术模式与业务模式分离
 
-Ozon API 技术字段必须原样保存。
-
-例如：
+Ozon API 技术字段必须原样保存，例如：
 
 ```text
 delivery_schema
@@ -173,7 +136,7 @@ stock.type
 schema
 ```
 
-业务层再生成：
+业务层再生成标准化字段，例如：
 
 ```text
 fulfillment_mode
@@ -196,262 +159,152 @@ UNMATCHED
 UNVERIFIED
 ```
 
-以及真正的：
+以及真正的 `0`。
 
-```text
-0
-```
-
-例如：
-
-Review API 因订阅权限无法读取时：
-
-```text
-review_count = UNAVAILABLE
-```
-
-而不是：
-
-```text
-review_count = 0
-```
+无权限、空响应、未验证结构不得被静默解释为业务 0。
 
 ---
 
 ## 2.6 Money 永远包含 Currency
 
-任何金额类字段都必须保留：
-
-```text
-amount
-currency
-```
-
-不得只保存金额而依赖 Shop Currency 推断。
-
-如果原始 API 自身没有 currency：
-
-必须保留：
-
-```text
-currency_state = UNKNOWN
-```
-
-而不是自行补上店铺结算币种。
+任何金额类事实必须同时表达金额与币种；如果来源没有显式 currency，保存 `currency_state = UNKNOWN`，不得通过 Shop Currency 猜测。
 
 ---
 
 ## 2.7 历史事实不可被当前值覆盖
 
-下列数据必须支持历史：
+当前阶段至少必须保留以下历史语义：
 
 - 商品身份映射；
 - 商品状态；
+- 商品属性；
 - 价格；
 - 库存；
+- Posting 状态与承诺时间；
+- Return / Reverse Logistics；
 - Rating；
-- Campaign 状态；
-- 卖家采购成本；
-- 汇率；
-- 算法版本。
+- Data Availability / Capability。
 
-历史订单不能使用当前最新 SKU 成本重新解释为“实际历史采购成本”。
+未来阶段模型重新进入时同样必须遵守“历史事实不可被当前值覆盖”。
 
 ---
 
 # 3. 数据层
 
-O3Pilot 建议采用以下逻辑数据层。
-
 ## 3.1 Raw Layer
 
-保存未经业务解释的来源数据。
+长期 Raw Store 只用于 automatic machine-acquired payload body。
 
-核心对象：
+SQLite 对应的核心 metadata 实体是：
 
-- `raw_api_response`
-- `raw_webhook_event`
+```text
+raw_capture
+```
 
-人工文件导入不保存文件本体，也不以完整 Raw Row 复制原文件内容。人工导入通过：
-
-- `import_batch`
-- `import_row_result`（可选）
-
-记录导入来源、处理结果和追溯信息。
-
-Raw Layer 不承担最终业务查询。
-
----
+人工导入文件不进入长期 Raw Store。
 
 ## 3.2 Normalized Fact Layer
 
-保存已经统一身份和字段的业务事实。
+保存已经统一身份和字段的当前阶段业务事实。
 
-例如：
-
-- Shop；
-- Product；
-- MotherOrder；
-- Posting；
-- PostingItem；
-- InventorySnapshot；
-- ReturnCase；
-- FinanceAccrual；
-- AdCampaign。
-
----
+当前 P0/P1 Active Normalized Model 见 §25。
 
 ## 3.3 Derived Layer
 
-保存可根据事实重新生成的分析结果。
+保存进入当前 Feature Phase 后允许存在的可重算结果。
 
-例如：
+当前 v1 允许 P0/P1 Derived，例如 Basic Alert；P2–P4 Derived Model 进入 Deferred Register。
 
-- Metric；
-- Profit；
-- Forecast；
-- Recommendation；
-- Alert；
-- Reconciliation Result。
+## 3.4 Read Model
+
+Read Model 仅在真实查询路径需要时建立，是可重建性能层，不是 Source of Truth。
 
 ---
 
-# 4. 通用字段规范
+# 4. Source / Capture Model
 
-核心实体建议统一包含以下字段。
+## 4.1 `raw_capture`
+
+`raw_capture` 表示一次真实的数据观察：某 Shop 在某一时间，通过某 Source / Endpoint 实际取得一次 API Response 或 Webhook Event。
+
+建议最小字段：
 
 ```text
-id
+raw_capture_id
 shop_id
-created_at
-updated_at
+source_system
+source_endpoint
+observed_at
+
+content_sha256
+content_type
+storage_encoding
+original_size_bytes
+stored_size_bytes
+
+sync_run_id
+request_fingerprint
+coverage_from
+coverage_to
 ```
 
-来源事实实体还应根据需要包含：
+其中以下字段按来源允许为空：
+
+```text
+sync_run_id
+request_fingerprint
+coverage_from
+coverage_to
+```
+
+`raw_capture` 只保存 metadata。完整 Raw Body 不进入 SQLite。
+
+Raw Content 的物理布局、atomic write、backup consistency、retention 由 ADR-001 / `ARCHITECTURE.md` 定义。
+
+禁止在 DATA_MODEL 中建立第二套 Locator Authority，例如：
+
+```text
+file_path
+object_path
+raw_object_path
+storage_path
+```
+
+也不新增独立 `raw_object` 业务实体。
+
+---
+
+## 4.2 `raw_ref`
+
+Normalized Fact 对自动来源的追溯统一使用：
+
+```text
+raw_ref
+→ FK
+→ raw_capture.raw_capture_id
+```
+
+`raw_ref` 不直接指向 filesystem path、SHA-256 或 JSON body。
+
+Source Fact 根据需要可包含：
 
 ```text
 source_system
 source_endpoint
 source_object_type
 source_object_key
-raw_payload_id
+raw_ref
 source_observed_at
 source_business_time
 parser_version
 mapping_version
 ```
 
-其中：
-
-### `source_system`
-
-例如：
-
-```text
-OZON_SELLER_API
-OZON_PERFORMANCE_API
-OZON_XAPI
-OZON_WEBHOOK
-OZON_OFFICIAL_REPORT
-MABANG_ERP
-SELLER_MANUAL
-```
-
-### `source_observed_at`
-
-O3Pilot 实际取得该数据的时间。
-
-### `source_business_time`
-
-Ozon 或外部系统表示的业务发生时间。
-
-两者不得混用。
+并非所有实体都必须拥有完全相同的通用字段模板。
 
 ---
 
-# 5. Shop
-
-## 5.1 `shop`
-
-代表一个独立 Ozon Seller Account / Shop。
-
-建议字段：
-
-```text
-shop_id
-ozon_client_id
-display_name
-legal_name
-country_code
-settlement_currency
-subscription_type
-is_active
-created_at
-updated_at
-```
-
-唯一约束：
-
-```text
-ozon_client_id
-```
-
-当前 API 凭证属于 Shop，但敏感凭证本身不进入普通业务数据表。
-
----
-
-## 5.2 `shop_capability`
-
-记录某 Shop 当前数据能力。
-
-例如：
-
-```text
-shop_id
-capability_code
-availability_status
-reason
-verified_at
-```
-
-例如 Review：
-
-```text
-capability_code = REVIEW_V2
-availability_status = UNAVAILABLE
-reason = SUBSCRIPTION_REQUIRED
-```
-
-这样 UI 和业务逻辑不会把“没有权限”误解释成“没有数据”。
-
----
-
-# 6. Source Lineage
-
-## 6.1 `raw_payload`
-
-统一保存 API / Webhook 原始 JSON。
-
-建议字段：
-
-```text
-raw_payload_id
-shop_id
-source_system
-source_endpoint
-request_fingerprint
-response_status
-payload_json
-fetched_at
-source_coverage_from
-source_coverage_to
-sync_run_id
-schema_fingerprint
-```
-
----
-
-## 6.2 `sync_run`
+## 4.3 `sync_run`
 
 代表一次同步任务执行。
 
@@ -477,9 +330,7 @@ error_message
 
 ---
 
-## 6.3 `data_quality_issue`
-
-记录数据异常。
+## 4.4 `data_quality_issue`
 
 建议字段：
 
@@ -512,39 +363,171 @@ DUPLICATE_SOURCE_OBJECT
 SYNC_GAP
 ```
 
+原基线只定义了 `details_json` 字段和 `issue_type`，没有定义其内容边界。Batch A.2 新增：
+
+```text
+data_quality_issue.details_json
+= bounded diagnostic context
+!= raw source payload
+```
+
+允许保存字段名、expected / actual、reason、matching context、validation result 等有限诊断信息；禁止复制完整 API Response、Webhook Payload 或完整 Source Object。
+
+---
+
+# 5. JSON Field Semantics
+
+ADR-001 禁止的是 Raw Body 长期存入 SQLite，不是 JSON 数据类型本身。
+
+DATA_MODEL 中所有 `*_json` 字段必须属于以下三类之一。
+
+## 5.1 RAW_BODY — 禁止进入 Normalized / Derived Row
+
+以下历史字段只作为禁止模式记录，不再属于正式字段定义：
+
+```text
+payload_json
+posting_item.raw_item_json
+return_item.raw_item_json
+raw_component_json
+raw_row_json
+```
+
+处理规则：
+
+```text
+Raw Body
+→ Content-addressed Raw Store
+
+Normalized / Derived Fact
+→ raw_ref
+→ raw_capture
+```
+
+Future Finance 重新设计时也不得恢复 `raw_component_json` 这类 Raw Body-in-row 模式。
+
+## 5.2 NORMALIZED_STRUCTURED_SNAPSHOT — 允许保留
+
+当前合法字段包括：
+
+```text
+attributes_json
+complex_attributes_json
+images_json
+barcodes_json
+conditions_json
+improve_attributes_json
+price_index_json
+commissions_json
+marketing_actions_json
+promotion_actions_json
+source_place_json
+target_place_json
+storage_json
+logistic_json
+visual_json
+```
+
+保留条件：
+
+1. 有明确业务语义；
+2. 表达 Normalized Snapshot / Fact 自身的动态结构；
+3. 不是完整 Source Object 的无解释副本；
+4. 不承担 Raw Payload 追溯职责。
+
+## 5.3 DIAGNOSTIC_OR_DERIVED_CONTEXT — 允许 bounded context
+
+例如：
+
+```text
+details_json
+calculation_details_json
+input_snapshot_json
+explanation_json
+```
+
+允许表达诊断、计算解释、规则输入等有限上下文，但禁止承载完整 Raw Payload。
+
+当前 Active Model 中 `data_quality_issue.details_json` 与 `alert.details_json` 按此规则使用；其他字段只有在对应 Future Derived Model 进入正式 Phase 后才能重新定义。
+
+---
+
+# 6. Shop
+
+## 6.1 `shop`
+
+代表一个独立 Ozon Seller Account / Shop。
+
+建议字段：
+
+```text
+shop_id
+ozon_client_id
+display_name
+legal_name
+country_code
+settlement_currency
+subscription_type
+is_active
+created_at
+updated_at
+```
+
+数据库级唯一约束：
+
+```text
+ozon_client_id
+```
+
+当前 API 凭证属于 Shop，但敏感凭证本身不进入普通业务数据表。
+
+---
+
+## 6.2 `shop_capability`
+
+记录某 Shop 当前数据能力。
+
+例如：
+
+```text
+shop_id
+capability_code
+availability_status
+reason
+verified_at
+```
+
+例如 Review：
+
+```text
+capability_code = REVIEW_V2
+availability_status = UNAVAILABLE
+reason = SUBSCRIPTION_REQUIRED
+```
+
+这样 UI 和业务逻辑不会把“没有权限”误解释成“没有数据”。
+
 ---
 
 # 7. 商品模型总览
 
-商品模型必须同时解决：
-
-- Ozon Product ID；
-- SKU；
-- offer_id；
-- 商品详情；
-- 变体；
-- 价格；
-- 内容评分；
-- 库存；
-- 订单商品关联；
-- Finance SKU 关联。
-
-核心关系：
+当前 Active Product Model 保持 Shop-scoped：
 
 ```text
-SellerCatalogItem
- └── SellerCatalogProductMapping
-      └── Shop
-           └── Product
-                ├── ProductIdentifierHistory
-                ├── ProductSnapshot
-                ├── ProductAttributeSnapshot
-                ├── ProductContentRatingSnapshot
-                ├── ProductPriceSnapshot
-                └── InventorySnapshot
+Shop
+└── Product
+    ├── ProductIdentifierHistory
+    ├── ProductSnapshot
+    ├── ProductAttributeSnapshot
+    ├── ProductContentRatingSnapshot
+    ├── ProductPriceSnapshot
+    ├── InventorySnapshot
+    └── InventoryTurnoverSnapshot
 ```
 
-`SellerCatalogItem` 是卖家内部跨店商品实体；`Product` 仍然是 Shop-scoped 的 Ozon 商品实体。两者不能合并。
+商品必须同时保留 Ozon Product ID、SKU、offer_id，不把 `offer_id` 当永久主键。
+
+跨店 Seller Catalog 不属于当前 Active Schema；不同 Shop 的商品不得仅根据相同 `offer_id`、SKU 或商品名称自动合并。完整 Seller Catalog 进入 Deferred Register。
 
 ---
 
@@ -569,7 +552,7 @@ created_at
 updated_at
 ```
 
-建议唯一约束：
+数据库级唯一约束：
 
 ```text
 (shop_id, ozon_product_id)
@@ -606,7 +589,7 @@ valid_from
 valid_to
 observed_at
 source_system
-raw_payload_id
+raw_ref
 ```
 
 用途：
@@ -619,76 +602,6 @@ raw_payload_id
 `offer_id` 不作为永久主键。
 
 ---
-
-## 9.2 `seller_catalog_item`
-
-代表卖家内部的 canonical 商品，不属于 Ozon 原始事实。
-
-它用于把多个店铺中实际属于同一真实商品的 Ozon Product 映射到同一个卖家内部商品。
-
-建议字段：
-
-```text
-seller_catalog_item_id
-internal_name
-internal_category
-supplier_id
-brand
-model
-variant
-created_at
-updated_at
-```
-
-典型用途：
-
-- 跨店合并库存；
-- 跨店总销量；
-- 跨店总利润；
-- 统一采购成本；
-- 供应商管理；
-- 总退货表现；
-- 跨店补货建议。
-
-不得通过相同 `offer_id`、商品名称或 SKU 自动认定两个店铺商品一定相同。
-
----
-
-## 9.3 `seller_catalog_product_mapping`
-
-建立 Seller Catalog 与 Shop Product 的显式关系。
-
-建议字段：
-
-```text
-seller_catalog_product_mapping_id
-seller_catalog_item_id
-product_id_internal
-shop_id
-
-mapping_status
-mapping_method
-confidence
-mapping_version
-
-valid_from
-valid_to
-created_at
-updated_at
-```
-
-`mapping_status` 至少支持：
-
-```text
-MATCHED_EXACT
-MATCHED_RULE
-AMBIGUOUS
-UNMATCHED
-UNVERIFIED
-```
-
----
-
 
 # 10. Product Snapshot
 
@@ -713,7 +626,7 @@ primary_image
 model_id
 model_count
 observed_at
-raw_payload_id
+raw_ref
 ```
 
 注意：
@@ -761,7 +674,7 @@ attributes_json
 complex_attributes_json
 images_json
 barcodes_json
-raw_payload_id
+raw_ref
 ```
 
 类目属性高度动态，因此不建议把所有 Ozon Attribute 强制拆成固定列。
@@ -785,7 +698,7 @@ shop_id
 sku
 total_rating
 observed_at
-raw_payload_id
+raw_ref
 ```
 
 评分组单独保存：
@@ -844,7 +757,7 @@ marketing_actions_json
 volume_weight
 
 observed_at
-raw_payload_id
+raw_ref
 ```
 
 金额字段是否具有独立 currency 以 API 实际返回为准。
@@ -887,7 +800,7 @@ warehouse_scope
 observed_at
 source_system
 source_endpoint
-raw_payload_id
+raw_ref
 ```
 
 其中：
@@ -935,93 +848,43 @@ current_stock
 inventory_days_cover
 turnover_grade
 observed_at
-raw_payload_id
+raw_ref
 ```
 
 它与 O3Pilot 自己计算的库存覆盖指标必须分开。
 
 ---
 
-## 14.4 `inbound_supply`
-
-代表正在进入 FBP 等仓库体系的补货 / 交货批次事实。
-
-该实体只描述“已计划或正在运输中的入库库存”，不代表 O3Pilot 会创建、修改或取消任何 Ozon 交货申请。
-
-建议字段：
-
-```text
-inbound_supply_id
-shop_id
-
-source_supply_id
-source_status
-fulfillment_mode
-
-origin_location
-destination_warehouse_id
-
-prepared_at
-shipped_at
-accepted_at
-completed_at
-cancelled_at
-
-source_system
-raw_payload_id
-created_at
-updated_at
-```
-
-来源可能是：
-
-- 已验证可读取的 Ozon 数据；
-- Ozon 官方报告；
-- 卖家自有数据；
-- 物流商数据。
-
-具体来源能力由 `DATA_SOURCES.md` 定义。
-
----
-
-## 14.5 `inbound_supply_item`
-
-建议字段：
-
-```text
-inbound_supply_item_id
-inbound_supply_id
-shop_id
-product_id_internal
-seller_catalog_item_id
-sku
-offer_id
-
-planned_quantity
-shipped_quantity
-accepted_quantity
-
-created_at
-updated_at
-```
-
-由此可以形成：
+# 15. In-transit Inventory — Phase / Source Boundary
 
 ```text
 Current Inventory
-+
+!=
 In-transit Inventory
 ```
 
-但二者必须作为不同事实保存。
+In-transit Inventory 是 P1 Core Operations 数据域；Manual path 在 P1 必须可用，自动来源仍为 `TBD`。
 
-库存覆盖与补货算法如何使用在途库存，由 `METRICS.md` 定义。
+当前不冻结具体 `Supply + SupplyItem` 两级 Normalized Schema，也不因为旧设计存在就假设 Ozon 自动来源一定按该结构提供数据。
+
+正式边界：
+
+```text
+Acquisition Phase = P1 manual path / TBD automatic
+Acquisition Policy = MANUAL / TBD automatic
+Backfillability = Source-dependent; state history required
+Normalized Phase = P1
+Metrics Phase = P1
+Feature Phase = P1
+```
+
+具体 Inbound Supply Schema 进入 Deferred Register，只有在真实自动来源验证，或 P1 Manual 输入格式确定且证明需要两级身份模型后重新 Review。 P1 实现前仍必须为已确定的 Manual Input 建立最小必要 Normalized Persistence，但不得直接复活旧的 Supply / SupplyItem 两表设计。
 
 ---
 
-# 15. 母订单 MotherOrder
+# 16. 母订单 MotherOrder
 
-## 15.1 定义
+## 16.1 定义
 
 Ozon 原始：
 
@@ -1043,9 +906,9 @@ mother_order
 
 ---
 
-## 15.2 `mother_order`
+## 16.2 `mother_order`
 
-建议字段：
+建议字段（`mother_order_id` 为可选 Surrogate Identity，不替代自然业务身份）：
 
 ```text
 mother_order_id
@@ -1058,7 +921,7 @@ created_at
 updated_at
 ```
 
-唯一约束：
+数据库级唯一约束：
 
 ```text
 (shop_id, order_number)
@@ -1074,9 +937,9 @@ MotherOrder 主要承担：
 
 ---
 
-# 16. Posting
+# 17. Posting
 
-## 16.1 定义
+## 17.1 定义
 
 Ozon 原始：
 
@@ -1092,11 +955,11 @@ O3Pilot 中文术语：
 
 ---
 
-## 16.2 `posting`
+## 17.2 `posting`
 
-Posting 是 O3Pilot 订单、履约、物流、取消、Finance、退货的核心连接点。
+Posting 是 O3Pilot 订单、履约、物流、取消、退货的核心连接点；未来 Finance 进入 P2 后也通过 Posting 建立业务关联。
 
-建议字段：
+建议字段（`posting_id` / `mother_order_id` 可作为内部关系优化，但不替代自然业务身份）：
 
 ```text
 posting_id
@@ -1137,12 +1000,12 @@ fulfillment_mapping_version
 
 first_seen_at
 last_seen_at
-raw_payload_id
+raw_ref
 created_at
 updated_at
 ```
 
-唯一约束：
+数据库级唯一约束：
 
 ```text
 (shop_id, posting_number)
@@ -1150,7 +1013,7 @@ updated_at
 
 ---
 
-# 17. Source Posting Family
+## 17.3 Source Posting Family
 
 `source_posting_family` 用于记录原始 API 技术来源。
 
@@ -1172,9 +1035,9 @@ FBP
 
 ---
 
-# 18. Fulfillment Mode
+## 17.4 Fulfillment Mode
 
-## 18.1 `fulfillment_mode`
+### 17.4.1 `fulfillment_mode`
 
 标准化业务模式当前允许：
 
@@ -1190,7 +1053,7 @@ WHD 不进入正常首次销售 `fulfillment_mode`。
 
 ---
 
-## 18.2 映射依据
+### 17.4.2 映射依据
 
 映射必须综合真实字段，例如：
 
@@ -1213,7 +1076,7 @@ warehouse
 
 ---
 
-## 18.3 映射版本
+### 17.4.3 映射版本
 
 所有标准化结果必须保存：
 
@@ -1225,9 +1088,39 @@ fulfillment_mapping_version
 
 ---
 
-# 19. Posting Item
+## 17.5 Cancellation
 
-## 19.1 `posting_item`
+### 17.5.1 `cancellation`
+
+取消作为独立业务事实，不与 Return 混合。
+
+建议字段：
+
+```text
+cancellation_id
+posting_id
+mother_order_id
+shop_id
+
+cancel_reason_id
+cancel_reason
+cancel_reason_raw
+
+initiator
+affects_rating
+cancelled_at
+
+source_system
+raw_ref
+```
+
+一条 Posting 原则上可以只有一个最终取消事实，但原始状态变化历史保留在 `posting_status_history`。
+
+---
+
+# 18. Posting Item
+
+## 18.1 `posting_item`
 
 代表一个 Posting 中的商品行。
 
@@ -1250,7 +1143,7 @@ unit_price_amount
 unit_price_currency
 
 line_index
-raw_item_json
+raw_ref
 created_at
 updated_at
 ```
@@ -1278,7 +1171,7 @@ posting_item_id
 
 ---
 
-## 19.2 `posting_item_pricing_observation`
+## 18.2 `posting_item_pricing_observation`
 
 订单商品侧同时可能出现多种价格和促销观察值。
 
@@ -1316,7 +1209,7 @@ promotion_actions_json
 
 source_system
 observed_at
-raw_payload_id
+raw_ref
 ```
 
 原则：
@@ -1331,9 +1224,9 @@ Final Finance Fact
 
 ---
 
-# 20. Posting Status History
+# 19. Posting Status / Schedule History
 
-## 20.1 `posting_status_history`
+## 19.1 `posting_status_history`
 
 建议字段：
 
@@ -1347,7 +1240,7 @@ status_time
 source_system
 source_event_type
 observed_at
-raw_payload_id
+raw_ref
 ```
 
 来源可以包括：
@@ -1359,7 +1252,7 @@ raw_payload_id
 
 ---
 
-## 20.2 `posting_schedule_history`
+## 19.2 `posting_schedule_history`
 
 用于保存 Ozon 对发货截止时间和承诺配送窗口的历史变化。
 
@@ -1380,7 +1273,7 @@ observed_at
 
 source_system
 source_event_type
-raw_payload_id
+raw_ref
 ```
 
 `change_type` 示例：
@@ -1406,9 +1299,9 @@ UNKNOWN
 
 ---
 
-# 21. Logistics Event
+# 20. Logistics / Warehouse / Delivery / Shipment
 
-## 21.1 `logistics_event`
+## 20.1 `logistics_event`
 
 用于统一物流节点。
 
@@ -1428,7 +1321,7 @@ provider_id
 tracking_number
 
 source_system
-raw_payload_id
+raw_ref
 ```
 
 标准 `event_type` 可以包括：
@@ -1449,7 +1342,7 @@ RETURNED
 
 ---
 
-## 21.2 `warehouse`
+## 20.2 `warehouse`
 
 仓库是标准化业务维度，不应长期只以 Posting 文本字段存在。
 
@@ -1472,7 +1365,7 @@ last_seen_at
 
 ---
 
-## 21.3 `logistics_provider`
+## 20.3 `logistics_provider`
 
 建议字段：
 
@@ -1494,7 +1387,7 @@ last_seen_at
 
 ---
 
-## 21.4 `delivery_method`
+## 20.4 `delivery_method`
 
 建议字段：
 
@@ -1519,7 +1412,7 @@ last_seen_at
 
 ---
 
-## 21.5 `shipment_package`
+## 20.5 `shipment_package`
 
 代表一个实际 Posting 下的包裹 / 货件测量事实。
 
@@ -1564,7 +1457,7 @@ measured_at
 
 source_system
 source_import_batch_id
-raw_payload_id
+raw_ref
 created_at
 updated_at
 ```
@@ -1577,39 +1470,9 @@ updated_at
 
 ---
 
-# 22. Cancellation
+# 21. Returns / Reverse Logistics
 
-## 22.1 `cancellation`
-
-取消作为独立业务事实，不与 Return 混合。
-
-建议字段：
-
-```text
-cancellation_id
-posting_id
-mother_order_id
-shop_id
-
-cancel_reason_id
-cancel_reason
-cancel_reason_raw
-
-initiator
-affects_rating
-cancelled_at
-
-source_system
-raw_payload_id
-```
-
-一条 Posting 原则上可以只有一个最终取消事实，但原始状态变化历史保留在 `posting_status_history`。
-
----
-
-# 23. Return Case
-
-## 23.1 `return_case`
+## 21.1 `return_case`
 
 统一表示 Ozon 退货 / 逆向物流业务 Case。
 
@@ -1648,14 +1511,20 @@ logistic_json
 visual_json
 compensation_status
 
-raw_payload_id
+raw_ref
 created_at
 updated_at
 ```
 
+数据库级唯一约束：
+
+```text
+(shop_id, return_source_type, source_return_id)
+```
+
 ---
 
-## 23.2 Return Source Type
+## 21.2 Return Source Type
 
 当前至少包括：
 
@@ -1668,9 +1537,9 @@ GENERAL_RETURN
 
 ---
 
-# 24. Return Item
+## 21.3 Return Item
 
-## 24.1 `return_item`
+### 21.3.1 `return_item`
 
 建议字段：
 
@@ -1698,7 +1567,7 @@ client_photo_count
 return_method_type
 return_tracking_number
 
-raw_item_json
+raw_ref
 ```
 
 买家评论、图片等可能包含个人数据。
@@ -1707,7 +1576,7 @@ raw_item_json
 
 ---
 
-# 25. WHD
+## 21.4 WHD
 
 WHD 属于逆向物流和二次销售场景。
 
@@ -1715,7 +1584,7 @@ WHD 属于逆向物流和二次销售场景。
 
 ---
 
-## 25.1 WHD 表达方式
+### 21.4.1 WHD 表达方式
 
 当前无需单独建立一个完全独立的“WHD Order”根实体。
 
@@ -1746,7 +1615,7 @@ return logistics
 
 则通过关联表：
 
-## 25.2 `reverse_logistics_link`
+### 21.4.2 `reverse_logistics_link`
 
 ```text
 reverse_logistics_link_id
@@ -1763,7 +1632,7 @@ mapping_version
 
 ---
 
-## 25.3 `reverse_logistics_event`
+### 21.4.3 `reverse_logistics_event`
 
 用于记录退货 / 未认购 / 取消件进入逆向物流后的生命周期事件。
 
@@ -1784,7 +1653,7 @@ logistics_provider_id
 tracking_number
 
 source_system
-raw_payload_id
+raw_ref
 ```
 
 标准 `event_type` 可在证据充分时映射为：
@@ -1806,782 +1675,9 @@ COMPENSATED
 
 ---
 
-# 26. Finance 类型字典
+# 22. Analytics — Daily SKU Metrics
 
-## 26.1 `finance_accrual_type`
-
-来自：
-
-```text
-/v1/finance/accrual/types
-```
-
-建议字段：
-
-```text
-type_id
-name
-description
-first_seen_at
-last_seen_at
-raw_payload_id
-```
-
-`type_id` 保留 Ozon 官方数字 ID。
-
-O3Pilot 可以额外增加内部中文分类，但不能替换官方 Type。
-
----
-
-# 27. Finance Accrual
-
-## 27.1 `finance_accrual`
-
-代表一个 Ozon Finance Accrual 根记录。
-
-建议字段：
-
-```text
-finance_accrual_id_internal
-shop_id
-
-accrual_id
-accrual_date
-
-accrued_category
-unit_number
-
-total_amount
-total_currency
-
-posting_id
-posting_number
-
-source_system
-raw_payload_id
-created_at
-```
-
-唯一约束：
-
-```text
-(shop_id, accrual_id)
-```
-
----
-
-## 27.2 `settlement_period`
-
-代表 Ozon 与卖家的一个结算周期。
-
-当前模型允许其主要来源先来自 Ozon 官方财务报告。
-
-建议字段：
-
-```text
-settlement_period_id
-shop_id
-
-period_from
-period_to
-settlement_currency
-
-source_system
-source_document_type
-source_import_batch_id
-
-created_at
-updated_at
-```
-
-Settlement 不替代 Accrual。
-
-关系为：
-
-```text
-Finance Accrual
-→ Settlement Reconciliation
-→ Payout
-```
-
----
-
-## 27.3 `payout`
-
-代表 Ozon 实际或计划向卖家支付的款项事实。
-
-建议字段：
-
-```text
-payout_id
-shop_id
-settlement_period_id
-
-payout_reference
-status
-
-amount
-currency
-
-planned_payment_date
-actual_payment_date
-
-withheld_amount
-withheld_currency
-
-source_system
-source_import_batch_id
-raw_payload_id
-
-created_at
-updated_at
-```
-
-当前没有可靠自动 API Contract 时：
-
-- 可以通过 Ozon 官方报告 / 结算文件导入；
-- 不得因为模型存在就假设 Seller API 一定可读取；
-- 不得根据 Finance Accrual 自行伪造“已付款”状态。
-
----
-
-# 28. Finance Component
-
-Finance 不能简单设计成“一条订单一条费用”。
-
-不同 Accrual 有不同粒度。
-
----
-
-## 28.1 `finance_component`
-
-用于把 Accrual 内真正的收入 / 费用拆成可分析的 Component。
-
-建议字段：
-
-```text
-finance_component_id
-finance_accrual_id_internal
-shop_id
-
-type_id
-
-scope
-posting_id
-posting_item_id
-sku
-
-amount
-currency
-
-quantity
-seller_price_amount
-seller_price_currency
-
-source_component_type
-raw_component_json
-created_at
-```
-
-`scope`：
-
-```text
-SHOP
-POSTING
-SKU
-CONTAINER
-UNKNOWN
-```
-
----
-
-## 28.2 SKU 级事实
-
-如果 Ozon 原始 Finance 明确携带 SKU：
-
-```text
-scope = SKU
-sku = ...
-```
-
-可以直接用于 SKU 级事实。
-
-例如当前已经验证的部分销售佣金。
-
----
-
-## 28.3 Posting 级事实
-
-如果 Ozon 只提供 Posting 级费用：
-
-```text
-scope = POSTING
-posting_id = ...
-sku = NULL
-```
-
-例如当前已验证的部分 rFBS 国际配送和代理费用。
-
-不得为了方便直接把该费用复制到每一个 SKU。
-
----
-
-# 29. Finance Allocation
-
-SKU 利润可能需要把 Posting 级费用分摊到商品。
-
-这属于 Derived Layer，而不是 Finance Fact。
-
----
-
-## 29.1 `finance_allocation`
-
-建议字段：
-
-```text
-finance_allocation_id
-finance_component_id
-posting_item_id
-
-allocated_amount
-currency
-
-allocation_rule
-allocation_rule_version
-allocation_weight
-calculation_run_id
-
-created_at
-```
-
-例如分摊方法可能是：
-
-```text
-BY_QUANTITY
-BY_REVENUE
-BY_WEIGHT
-BY_VOLUME
-CUSTOM
-```
-
-具体哪一种用于哪项费用，在 `METRICS.md` 定义。
-
----
-
-# 30. Money
-
-Money 是概念 Value Object。
-
-任何 Money 最低包含：
-
-```text
-amount DECIMAL
-currency CHAR(3)
-```
-
-禁止使用 Binary Float 作为正式财务存储。
-
----
-
-# 31. Ozon Exchange Rate
-
-O3Pilot 将 Ozon 业务汇率与卖家采购成本汇率分开。
-
----
-
-## 31.1 `ozon_exchange_rate_interval`
-
-来源：
-
-```text
-OZON_XAPI
-```
-
-当前数据来自 Ozon 官方帮助页面实际调用的：
-
-```text
-GET https://xapi.ozon.ru/exchange-rates/sellers/exchange-rate/by-period
-```
-
-建议字段：
-
-```text
-ozon_exchange_rate_id
-
-from_currency
-to_currency
-
-valid_from
-valid_to
-
-service_rate
-sale_rate
-
-marketplace_id
-
-source_system
-fetched_at
-raw_payload_id
-```
-
-映射：
-
-```text
-service_rate = exchangeRate.rate
-sale_rate    = exchangeRate.rateWithAdjustment
-```
-
-当前 Ozon 页面语义：
-
-```text
-service_rate -> 服务和罚款
-sale_rate    -> 销售
-```
-
----
-
-## 31.2 时间匹配
-
-汇率必须根据业务时间匹配：
-
-```text
-valid_from <= business_time < valid_to
-```
-
-不能仅通过北京时间日期 Join。
-
-当前实测的时间段以 UTC 21:00 切分，对应莫斯科自然日 00:00。
-
-Raw `valid_from` / `valid_to` 必须原样保存。
-
----
-
-## 31.3 XAPI 稳定性状态
-
-该接口已经取得真实响应，但并非 Seller API / Performance API 正式 Contract。
-
-因此必须：
-
-- 保存历史；
-- 保存 Raw；
-- 允许接口未来变化；
-- 不能只在利润页面实时请求而不落库。
-
----
-
-# 32. Money Conversion
-
-所有派生币种转换建议使用统一记录。
-
-## 32.1 `money_conversion`
-
-建议字段：
-
-```text
-money_conversion_id
-
-source_entity_type
-source_entity_id
-source_field
-
-original_amount
-original_currency
-
-converted_amount
-converted_currency
-
-exchange_rate
-exchange_rate_type
-exchange_rate_provider
-exchange_rate_reference_id
-
-rate_basis_type
-rate_basis_time
-rate_policy_version
-
-calculation_version
-calculated_at
-```
-
-`exchange_rate_type` 示例：
-
-```text
-OZON_SALE
-OZON_SERVICE
-SELLER_COST
-MANUAL
-```
-
-`rate_basis_type` 至少支持：
-
-```text
-ORDER_CREATED_AT
-SERVICE_PROVIDED_AT
-ACCRUAL_DATE
-ERP_TRANSACTION_CONTEXT
-MANUAL
-UNKNOWN
-```
-
-例如：
-
-- 商品销售和部分配送费用可能依据订单创建时间；
-- 仓储、逆向物流、销毁等服务可能依据服务提供时间；
-- ERP 采购成本使用 ERP 自己的订单 / 成本上下文。
-
-不能只保存一个笼统的 `business_time`。
-
-原始 Money 永远不能被转换结果覆盖。
-
----
-
-
-# 33. 卖家成本模型
-
-卖家采购成本、卖家自有物流费用和包装等成本属于 Seller-Owned Data。
-
-它们不属于 Ozon 原始事实。
-
----
-
-## 33.1 成本域原则
-
-必须明确区分：
-
-```text
-Ozon Finance Logistics Fee
-!=
-Seller / Logistics Provider Actual Cost
-```
-
-Ozon 向卖家收取的物流相关 Finance Component 属于 Ozon Finance。
-
-卖家向物流商、仓储方或其他服务商实际支付的费用属于 Seller Cost。
-
-两者都可以进入 Profit，但来源与语义必须分开。
-
----
-
-## 33.2 `seller_logistics_charge`
-
-保存卖家侧订单级或包裹级实际物流成本。
-
-建议字段：
-
-```text
-seller_logistics_charge_id
-shop_id
-posting_id
-shipment_package_id
-
-logistics_provider_id
-charge_type
-
-amount
-currency
-
-actual_weight
-volumetric_weight
-chargeable_weight
-weight_unit
-
-billed_at
-
-source_system
-source_import_batch_id
-source_row_number
-
-mapping_status
-mapping_version
-created_at
-```
-
-`charge_type` 示例：
-
-```text
-DOMESTIC
-CROSS_BORDER
-LAST_MILE
-RETURN
-WAREHOUSING
-PACKAGING
-OTHER
-```
-
-具体导入字段由对应 Adapter 定义。
-
-如果物流商数据只能关联到 Posting 而不能准确关联到 SKU：
-
-不得静默分摊到商品。
-
-SKU Profit 的分摊进入 Derived Layer。
-
----
-
-# 34. Seller SKU Cost
-
-## 34.1 `seller_sku_cost`
-
-用于保存 SKU 的参考 / 当前采购成本配置。
-
-建议字段：
-
-```text
-seller_sku_cost_id
-shop_id
-product_id_internal
-sku
-offer_id
-
-cost_amount
-cost_currency
-
-valid_from
-valid_to
-
-supplier_id
-source_system
-source_import_batch_id
-
-created_at
-updated_at
-```
-
-用途：
-
-- 当前参考成本；
-- 预测；
-- 没有订单实际成本时的 fallback 候选。
-
-不能默认用当前 `seller_sku_cost` 重算历史订单实际成本。
-
----
-
-# 35. Order Item Actual Cost
-
-## 35.1 `order_item_cost`
-
-保存某一个历史订单商品实际使用的采购成本事实。
-
-建议字段：
-
-```text
-order_item_cost_id
-posting_item_id
-posting_id
-shop_id
-
-cost_basis_amount
-cost_basis_currency
-
-erp_exchange_rate
-erp_exchange_rate_direction
-
-transaction_cost_amount
-transaction_cost_currency
-
-source_system
-source_import_batch_id
-source_row_number
-
-mapping_version
-created_at
-```
-
-这是历史 Profit 计算最重要的卖家侧数据之一。
-
----
-
-# 36. 马帮 ERP 成本 Adapter
-
-当前已确认的马帮 ERP 导出字段包括：
-
-```text
-订单编号
-平台SKU
-平台SKU数量
-平台SKU单个成本
-汇率(原币)
-平台链接
-```
-
----
-
-## 36.1 字段映射
-
-建议 Adapter 映射：
-
-```text
-订单编号
-→ posting.posting_number
-
-平台SKU
-→ offer_id / seller platform SKU reference
-
-平台SKU数量
-→ source_quantity
-
-平台SKU单个成本
-→ cost_basis_amount
-
-汇率(原币)
-→ erp_exchange_rate
-
-平台链接
-→ source_product_url
-```
-
-由于“平台SKU”是 ERP 自身命名，不得因为字段名包含 SKU 就直接映射到 Ozon `sku` 数字字段。
-
-应通过：
-
-```text
-posting_number
-+
-产品标识映射
-```
-
-确定对应的 `posting_item_id`。
-
----
-
-## 36.2 当前成本换算语义
-
-当前真实样本支持：
-
-- CNY 订单样本可见 `汇率(原币)=1.0`；
-- USD 订单样本可见 `汇率(原币)=6.9`；
-- 同一商品可以在不同订单出现不同 `汇率(原币)`；
-- 同一商品历史采购成本也可能变化。
-
-因此马帮汇率属于订单商品成本上下文的一部分。
-
-不能：
-
-```text
-把 6.9 硬编码为 USD
-```
-
-而应通过对应 Ozon Posting / Product 的真实币种决定：
-
-```text
-transaction_cost_currency
-```
-
----
-
-## 36.3 当前 Adapter 换算规则
-
-对于当前已验证马帮导出格式，Adapter 可以记录：
-
-```text
-transaction_cost_amount
-=
-cost_basis_amount / erp_exchange_rate
-```
-
-但必须同时保存：
-
-```text
-cost_basis_amount
-erp_exchange_rate
-transaction_cost_amount
-transaction_cost_currency
-mapping_version
-```
-
-这样未来马帮导出字段语义变化时，可以重算或审计。
-
----
-
-## 36.4 Cost Basis Currency
-
-`平台SKU单个成本` 的基础币种不能只从字段名推断。
-
-当前数据与 Ozon 订单币种交叉验证支持其作为当前 ERP 成本基准金额使用，但正式导入 Profile 应显式定义：
-
-```text
-cost_basis_currency
-```
-
-而不是让 Parser 永久硬编码。
-
-例如当前马帮导入 Profile 可以配置：
-
-```text
-cost_basis_currency = CNY
-```
-
-该配置属于 Adapter Contract。
-
----
-
-# 37. Seller Cost FX 与 Ozon FX 分离
-
-以下两类汇率永远分开：
-
-## Ozon Business FX
-
-来源：
-
-```text
-OZON_XAPI
-```
-
-用于解释：
-
-- Ozon 销售；
-- Ozon 服务；
-- Ozon 罚款；
-- Ozon 业务换算。
-
-## Seller Cost FX
-
-来源：
-
-```text
-MABANG_ERP
-SELLER_MANUAL
-其他 Seller Data
-```
-
-用于：
-
-- 采购成本；
-- 卖家内部成本。
-
-禁止使用 Ozon `sale_rate` 自动替代 ERP 采购汇率。
-
-禁止使用 ERP 采购汇率改写 Ozon Finance 原始金额。
-
----
-
-# 38. Seller Cost Fallback
-
-历史订单成本建议允许明确的来源优先级，但具体 Profit 公式由 `METRICS.md` 定义。
-
-数据模型至少能够区分：
-
-```text
-ACTUAL_ORDER_ITEM_COST
-SKU_COST_AT_ORDER_TIME
-CURRENT_SKU_COST
-MISSING
-```
-
-任何 fallback 必须保存：
-
-```text
-cost_source_type
-```
-
-避免把估算成本展示为实际历史采购成本。
-
----
-
-# 39. Analytics — SKU Daily
-
-## 39.1 `sku_daily_analytics`
+## 22.1 `sku_daily_analytics`
 
 来源：
 
@@ -2589,7 +1685,7 @@ cost_source_type
 /v1/analytics/data
 ```
 
-唯一粒度：
+业务粒度 / 数据库级唯一身份：
 
 ```text
 shop_id + sku + business_date
@@ -2624,7 +1720,7 @@ cancellations
 delivered_units
 
 source_metrics_signature
-raw_payload_id
+raw_ref
 ```
 
 `revenue` 当前没有逐行显式 currency 时：
@@ -2641,426 +1737,9 @@ currency_state = UNKNOWN
 
 ---
 
-# 40. Search Analytics
+# 23. Shop Health / Rating / FBS Error
 
-## 40.1 `sku_search_period_analytics`
-
-粒度：
-
-```text
-shop_id + sku + period_from + period_to
-```
-
-建议字段：
-
-```text
-sku_search_period_analytics_id
-shop_id
-product_id_internal
-sku
-period_from
-period_to
-
-unique_search_users
-position
-unique_view_users
-view_conversion
-gmv_amount
-gmv_currency
-
-raw_payload_id
-```
-
-无数据 SKU 可能被 API 整体省略。
-
-因此实体不存在不等于指标为 0。
-
----
-
-## 40.2 `sku_search_query_analytics`
-
-粒度：
-
-```text
-shop_id + sku + query + period_from + period_to
-```
-
-建议字段：
-
-```text
-sku_search_query_analytics_id
-shop_id
-product_id_internal
-sku
-query
-query_index
-period_from
-period_to
-
-unique_search_users
-unique_view_users
-position
-view_conversion
-order_count
-gmv_amount
-gmv_currency
-
-raw_payload_id
-```
-
----
-
-# 41. Advertising Account
-
-Performance API 凭证与 Seller API 凭证独立。
-
-建议增加：
-
-## 41.1 `advertising_account`
-
-```text
-advertising_account_id
-shop_id
-performance_client_id
-is_active
-first_seen_at
-last_seen_at
-```
-
-敏感 `client_secret` 不进入普通业务数据模型。
-
----
-
-# 42. Ad Campaign
-
-## 42.1 `ad_campaign`
-
-建议字段：
-
-```text
-ad_campaign_id_internal
-advertising_account_id
-shop_id
-
-campaign_id
-title
-adv_object_type
-created_at_source
-first_seen_at
-last_seen_at
-```
-
-唯一约束：
-
-```text
-(advertising_account_id, campaign_id)
-```
-
----
-
-## 42.2 `ad_campaign_snapshot`
-
-Campaign 配置和状态需要历史。
-
-建议字段：
-
-```text
-campaign_snapshot_id
-ad_campaign_id_internal
-
-state
-placement_json
-payment_type
-
-product_campaign_mode
-product_autopilot_strategy
-expense_strategy
-budget_type
-
-daily_budget_raw
-weekly_budget_raw
-budget_raw
-
-observed_at
-raw_payload_id
-```
-
-由于 Performance Campaign List 预算字段存在特殊 Scale：
-
-Raw 值必须保留。
-
-标准化金额可以单独生成，但不得覆盖 Raw。
-
----
-
-# 43. Ad Campaign Daily Metric
-
-## 43.1 `ad_campaign_daily_metric`
-
-粒度：
-
-```text
-campaign + day
-```
-
-建议字段：
-
-```text
-ad_campaign_daily_metric_id
-ad_campaign_id_internal
-shop_id
-business_date
-
-views
-clicks
-spend_amount
-spend_currency
-orders
-orders_amount
-orders_currency
-to_cart
-
-ctr_raw
-cpc_raw
-drr_raw
-
-raw_payload_id
-```
-
-无数据日期可能没有记录。
-
-因此：
-
-```text
-row missing
-```
-
-不能自动补成全部指标 `0`，除非指标计算规则明确允许。
-
----
-
-# 44. Ad Campaign Period Metric
-
-Campaign 区间统计可以作为对账和临时查询结果。
-
-建议：
-
-```text
-ad_campaign_period_metric
-```
-
-字段：
-
-```text
-ad_campaign_period_metric_id
-ad_campaign_id_internal
-period_from
-period_to
-views
-clicks
-spend_amount
-orders
-orders_amount
-to_cart
-raw_payload_id
-```
-
-长期趋势主事实仍优先使用 Daily。
-
----
-
-# 45. Ad Campaign SKU Daily Metric
-
-## 45.1 `ad_campaign_sku_daily_metric`
-
-粒度：
-
-```text
-Campaign + Day + SKU
-```
-
-建议字段：
-
-```text
-ad_campaign_sku_daily_metric_id
-ad_campaign_id_internal
-shop_id
-
-product_id_internal
-sku
-business_date
-
-views
-clicks
-spend_amount
-spend_currency
-orders
-sales_amount
-sales_currency
-
-ctr_raw
-cpc_raw
-drr_raw
-
-fetched_at
-raw_payload_id
-```
-
-这是高价值不可补回数据。
-
-由于当前 API 只允许今天 / 昨天：
-
-每条成功结果都应作为 Historical Fact 持久化。
-
----
-
-# 46. Ad Campaign Object
-
-## 46.1 `ad_campaign_object`
-
-当前状态：
-
-PARTIAL。
-
-建议字段：
-
-```text
-ad_campaign_object_id
-ad_campaign_id_internal
-object_id_raw
-candidate_sku
-mapping_status
-observed_at
-raw_payload_id
-```
-
-当前样本中：
-
-```text
-object_id == sku
-```
-
-不能升级为永久数据库约束。
-
-必须保留：
-
-```text
-mapping_status
-```
-
----
-
-# 47. Performance Phrases
-
-当前未取得非空真实 Rows。
-
-因此 DATA_MODEL v1.0 不定义正式 `ad_phrase_metric` 业务表。
-
-Raw 异步任务和报表可以保存，但不能建立依赖其字段的核心业务 Contract。
-
-未来获得真实非空数据后再升级数据模型。
-
----
-
-# 48. Question
-
-## 48.1 `question`
-
-建议字段：
-
-```text
-question_id_internal
-shop_id
-
-question_id
-product_id_internal
-sku
-
-text
-status
-answers_count
-created_at_source
-product_url
-
-author_name
-raw_payload_id
-created_at
-updated_at
-```
-
-`author_name` 属于个人相关字段，应由 `SECURITY.md` 控制存储与展示。
-
----
-
-# 49. Answer
-
-## 49.1 `answer`
-
-建议字段：
-
-```text
-answer_id_internal
-question_id_internal
-shop_id
-
-answer_id
-text
-author_name
-published_at
-status_publication
-
-raw_payload_id
-```
-
-Question 与 Answer：
-
-```text
-Question 1 → N Answer
-```
-
-不能只依赖 Question Detail 获取答案正文。
-
----
-
-# 50. Review
-
-Review 当前受订阅权限限制。
-
-数据模型可以预留实体定义，但不可假定当前 Shop 有数据。
-
----
-
-## 50.1 `review`
-
-建议预留：
-
-```text
-review_id_internal
-shop_id
-review_id
-product_id_internal
-sku
-rating
-text
-created_at_source
-raw_payload_id
-```
-
-其数据可用性由：
-
-```text
-shop_capability
-```
-
-决定。
-
-当当前能力为 `UNAVAILABLE` 时，不创建伪造的 0 Review Facts。
-
----
-
-# 51. Shop Rating
-
-## 51.1 `shop_rating_snapshot`
+## 23.1 `shop_rating_snapshot`
 
 统一保存 Current 与 History。
 
@@ -3089,7 +1768,7 @@ status_premium
 period_from
 period_to
 observed_at
-raw_payload_id
+raw_ref
 ```
 
 当前 Snapshot 可以看作：
@@ -3102,9 +1781,9 @@ History 则使用 Ozon 返回的日区间。
 
 ---
 
-# 52. FBS Error Index
+## 23.2 FBS Error Index
 
-## 52.1 `fbs_error_index_snapshot`
+### 23.2.1 `fbs_error_index_snapshot`
 
 建议字段：
 
@@ -3115,24 +1794,24 @@ index_value
 processing_cost_amount
 processing_cost_currency_state
 observed_at
-raw_payload_id
+raw_ref
 ```
 
 ---
 
-## 52.2 `fbs_error_defect_daily`
+### 23.2.2 `fbs_error_defect_daily`
 
 ```text
 fbs_error_defect_daily_id
 shop_id
 business_date
 defect_value
-raw_payload_id
+raw_ref
 ```
 
 ---
 
-## 52.3 `fbs_error_posting`
+### 23.2.3 `fbs_error_posting`
 
 当前真实列表为空。
 
@@ -3146,16 +1825,50 @@ source_error_id
 error_type
 amount
 currency
-raw_payload_id
+raw_ref
 ```
 
 但这些非空字段在获得真实样本前不能被视为已验证 Contract。
 
 ---
 
-# 53. Webhook Capability
+## 23.3 Alert
 
-## 53.1 `webhook_push_type`
+### 23.3.1 `alert`
+
+建议字段：
+
+```text
+alert_id
+shop_id
+
+alert_type
+severity
+
+entity_type
+entity_id
+
+triggered_at
+resolved_at
+status
+
+metric_code
+metric_value
+threshold_value
+
+rule_version
+details_json
+```
+
+Alert 引用其他域的数据，而不是复制业务事实。`details_json` 只允许 bounded diagnostic / derived context，不得保存完整 Raw Payload。
+
+---
+
+# 24. Source / Sync / Import / Data Integrity
+
+## 24.1 Webhook Capability
+
+### 24.1.1 `webhook_push_type`
 
 记录 Shop 当前可用 Push Type。
 
@@ -3170,18 +1883,18 @@ endpoint_bound
 endpoint_id
 endpoint_url
 observed_at
-raw_payload_id
+raw_ref
 ```
 
 它是配置观察，不代表 O3Pilot 会修改订阅。
 
 ---
 
-# 54. Webhook Event
+## 24.2 Webhook Event
 
-## 54.1 `webhook_event`
+### 24.2.1 `webhook_event`
 
-Webhook 原始事件必须先落 Raw。
+Webhook 原始事件必须先完成 Raw durable capture。完整事件正文由 Raw Store 保存，`webhook_event` 只保存可索引字段与 `raw_ref`。
 
 建议标准索引字段：
 
@@ -3200,16 +1913,16 @@ received_at
 
 dedup_fingerprint
 processing_status
-raw_payload_id
+raw_ref
 ```
 
 由于真实 Payload Contract 尚未完全验证：
 
-除 Raw Payload 外，所有提取字段都应允许 `NULL`。
+除 Raw Store 中的原始正文外，所有尚未验证的提取字段都应允许 `NULL`。
 
 ---
 
-## 54.2 Webhook 幂等
+### 24.2.2 Webhook 幂等
 
 在 Ozon 重复行为未完全验证前：
 
@@ -3231,7 +1944,7 @@ dedup_fingerprint
 
 ---
 
-# 55. Manual Import Tracking
+## 24.3 Manual Import Tracking
 
 人工导入文件仅作为一次性输入介质。O3Pilot 不持久化 CSV / XLSX 等原文件内容，也不把原文件复制到数据库、R2 或其他长期对象存储。
 
@@ -3241,7 +1954,7 @@ dedup_fingerprint
 - 导入批次记录；
 - 必要的逐行处理结果或错误记录。
 
-## 55.1 `import_batch`
+### 24.3.1 `import_batch`
 
 代表一次用户上传并解析数据的导入批次，也是人工导入的主要追溯记录。
 
@@ -3283,7 +1996,7 @@ supersedes_import_batch_id
 
 ---
 
-## 55.2 `import_row_result`
+### 24.3.2 `import_row_result`
 
 可选的逐行处理结果，只用于需要定位失败、未匹配或异常行的导入。
 
@@ -3307,9 +2020,9 @@ error_message
 
 ---
 
-# 56. Reconciliation
+## 24.4 Reconciliation
 
-## 56.1 `reconciliation_result`
+### 24.4.1 `reconciliation_result`
 
 用于比较两个来源。
 
@@ -3339,7 +2052,7 @@ checked_at
 
 ```text
 Seller API vs Ozon Official Report
-Finance Accrual vs Official Finance Report
+Finance Accrual vs Official Finance Report（P2 进入后）
 Webhook vs Seller API
 ```
 
@@ -3347,232 +2060,11 @@ Webhook vs Seller API
 
 ---
 
-# 57. Profit Calculation Run
-
-Profit 是 Derived Layer。
-
-DATA_MODEL 只定义可追溯结构，不定义公式。
-
----
-
-## 57.1 `profit_calculation_run`
-
-建议字段：
-
-```text
-profit_calculation_run_id
-shop_id
-period_from
-period_to
-
-reporting_currency
-metric_version
-allocation_version
-fx_version
-cost_fallback_version
-
-calculated_at
-status
-```
-
----
-
-# 58. Order Profit
-
-## 58.1 `order_profit`
-
-建议字段：
-
-```text
-order_profit_id
-profit_calculation_run_id
-posting_id
-mother_order_id
-shop_id
-
-revenue_amount
-fee_amount
-ad_spend_amount
-procurement_cost_amount
-seller_logistics_cost_amount
-other_cost_amount
-profit_amount
-
-currency
-calculation_details_json
-```
-
-所有 Component 必须能追溯：
-
-- Finance；
-- Order Item Cost；
-- Ad Metric；
-- Seller Costs；
-- Money Conversion。
-
----
-
-# 59. Order Item Profit
-
-## 59.1 `order_item_profit`
-
-建议字段：
-
-```text
-order_item_profit_id
-profit_calculation_run_id
-posting_item_id
-shop_id
-
-revenue_amount
-allocated_fee_amount
-allocated_ad_spend_amount
-procurement_cost_amount
-allocated_other_cost_amount
-profit_amount
-
-currency
-calculation_details_json
-```
-
-任何 Posting 级费用拆到 SKU 时，都必须引用：
-
-```text
-finance_allocation
-```
-
-而不是伪装成原始 SKU Finance Fact。
-
----
-
-# 60. Forecast
-
-Forecast 属于 Derived Layer。
-
-## 60.1 `forecast_run`
-
-```text
-forecast_run_id
-shop_id
-forecast_type
-model_name
-model_version
-training_data_from
-training_data_to
-created_at
-```
-
----
-
-## 60.2 `forecast_point`
-
-```text
-forecast_point_id
-forecast_run_id
-product_id_internal
-sku
-target_date
-forecast_value
-lower_bound
-upper_bound
-unit
-```
-
----
-
-## 60.3 `forecast_backtest`
-
-```text
-forecast_backtest_id
-forecast_run_id
-target_date
-actual_value
-forecast_value
-error_value
-metric_version
-```
-
-具体预测准确率进入 `METRICS.md`。
-
----
-
-# 61. Recommendation
-
-## 61.1 `recommendation`
-
-建议字段：
-
-```text
-recommendation_id
-shop_id
-recommendation_type
-
-entity_type
-entity_id
-
-generated_at
-valid_until
-
-priority
-status
-
-input_snapshot_json
-model_version
-explanation_json
-```
-
-例如：
-
-```text
-REPLENISHMENT
-CLEARANCE
-PRICE
-AD_BID
-AD_BUDGET
-PRODUCT_OPTIMIZATION
-```
-
-Recommendation 永远不能直接转化成 Ozon 写操作。
-
----
-
-# 62. Alert
-
-## 62.1 `alert`
-
-建议字段：
-
-```text
-alert_id
-shop_id
-
-alert_type
-severity
-
-entity_type
-entity_id
-
-triggered_at
-resolved_at
-status
-
-metric_code
-metric_value
-threshold_value
-
-rule_version
-details_json
-```
-
-Alert 引用其他域的数据，而不是复制业务事实。
-
----
-
-# 63. 数据可用性
+## 24.5 数据可用性
 
 为明确区分“0”和“没有数据”，建议建立：
 
-## 63.1 `data_availability`
+### 24.5.1 `data_availability`
 
 ```text
 data_availability_id
@@ -3600,11 +2092,11 @@ STALE
 
 ---
 
-# 64. 时间模型
+## 24.6 时间模型
 
 所有时间字段必须明确语义。
 
-## 64.1 Timestamp
+### 24.6.1 Timestamp
 
 原始 Timestamp：
 
@@ -3614,7 +2106,7 @@ STALE
 
 ---
 
-## 64.2 Business Date
+### 24.6.2 Business Date
 
 对于：
 
@@ -3633,7 +2125,7 @@ source_date_semantics
 
 ---
 
-## 64.3 默认显示时区
+### 24.6.3 默认显示时区
 
 O3Pilot 默认：
 
@@ -3647,7 +2139,7 @@ Asia/Shanghai
 
 ---
 
-# 65. Snapshot 模型
+## 24.7 Snapshot 模型
 
 以下数据默认使用 Snapshot 建立历史：
 
@@ -3657,7 +2149,6 @@ Asia/Shanghai
 - Price；
 - Inventory；
 - Inventory Turnover；
-- Campaign；
 - Shop Rating；
 - Shop Info；
 - Capability。
@@ -3672,41 +2163,36 @@ observed_at
 
 ---
 
-# 66. 事实表与快照表区别
+## 24.8 Fact 与 Snapshot
 
-## Fact
+### Fact
 
 代表已经发生的业务事实，例如：
 
 - Posting；
 - Posting Item；
 - Return；
-- Finance Accrual；
-- Question；
-- Answer；
-- Campaign Daily Metric。
+- Analytics SKU × Day；
+- Webhook Event。
 
 Fact 不应因为下一次同步不存在就自动删除。
 
-## Snapshot
+### Snapshot
 
 代表某一时点观察，例如：
 
 - Price；
 - Inventory；
-- Campaign State；
 - Rating Current；
 - Product Content Rating。
 
 ---
 
-# 67. 删除与消失
+## 24.9 删除与消失
 
 API 全量列表中对象消失时：
 
 不得物理删除历史实体。
-
-例如 Campaign 曾发生短暂空集合。
 
 正确处理是：
 
@@ -3719,7 +2205,7 @@ source_missing_since
 而不是：
 
 ```text
-DELETE FROM campaign
+DELETE FROM business_fact
 ```
 
 同样适用于：
@@ -3730,249 +2216,7 @@ DELETE FROM campaign
 
 ---
 
-# 68. 主键与唯一约束总览
-
-| 实体 | 推荐 Source Unique Key |
-|---|---|
-| Shop | `ozon_client_id` |
-| Product | `(shop_id, ozon_product_id)` |
-| Product Identifier History | `(product_id_internal, sku, offer_id, valid_from)` |
-| MotherOrder | `(shop_id, order_number)` |
-| Posting | `(shop_id, posting_number)` |
-| PostingItem | Internal ID；不强制假设 SKU 唯一 |
-| ReturnCase | `(shop_id, return_source_type, source_return_id)` |
-| FinanceAccrual | `(shop_id, accrual_id)` |
-| FinanceAccrualType | `type_id` |
-| SKU Daily Analytics | `(shop_id, sku, business_date)` |
-| Search Period Analytics | `(shop_id, sku, period_from, period_to)` |
-| Search Query Analytics | `(shop_id, sku, query, period_from, period_to)` |
-| AdCampaign | `(advertising_account_id, campaign_id)` |
-| AdCampaignDaily | `(ad_campaign_id_internal, business_date)` |
-| AdCampaignSkuDaily | `(ad_campaign_id_internal, sku, business_date)` |
-| Question | `(shop_id, question_id)` |
-| Answer | `(shop_id, answer_id)` |
-| Rating History | `(shop_id, rating_code, period_from, period_to)` |
-| Ozon FX | `(from_currency, to_currency, valid_from, valid_to)` |
-| Import Batch | `file_hash` + import context |
-
-真正数据库约束需在实现前根据所有真实源字段再次验证。
-
----
-
-# 69. 核心关系总览
-
-```text
-SellerCatalogItem
-└── SellerCatalogProductMapping
-    └── Shop
-        │
-        ├── Product
-        │   ├── ProductIdentifierHistory
-        │   ├── ProductSnapshot
-        │   ├── ProductAttributeSnapshot
-        │   ├── ProductContentRatingSnapshot
-        │   ├── ProductPriceSnapshot
-        │   ├── InventorySnapshot
-        │   ├── InventoryTurnoverSnapshot
-        │   ├── SkuDailyAnalytics
-        │   ├── SearchAnalytics
-        │   └── SellerSkuCost
-        │
-        ├── InboundSupply
-        │   └── InboundSupplyItem
-        │
-        ├── MotherOrder
-        │   └── Posting
-        │       ├── PostingItem
-        │       │   ├── PostingItemPricingObservation
-        │       │   ├── OrderItemCost
-        │       │   └── OrderItemProfit
-        │       ├── PostingStatusHistory
-        │       ├── PostingScheduleHistory
-        │       ├── LogisticsEvent
-        │       ├── ShipmentPackage
-        │       │   └── SellerLogisticsCharge
-        │       ├── Cancellation
-        │       ├── ReturnCase
-        │       │   ├── ReturnItem
-        │       │   └── ReverseLogisticsEvent
-        │       ├── FinanceAccrual
-        │       │   └── FinanceComponent
-        │       │       └── FinanceAllocation
-        │       └── OrderProfit
-        │
-        ├── SettlementPeriod
-        │   └── Payout
-        │
-        ├── Warehouse
-        ├── LogisticsProvider
-        ├── DeliveryMethod
-        │
-        ├── AdvertisingAccount
-        │   └── AdCampaign
-        │       ├── AdCampaignSnapshot
-        │       ├── AdCampaignDailyMetric
-        │       ├── AdCampaignSkuDailyMetric
-        │       └── AdCampaignObject
-        │
-        ├── Question
-        │   └── Answer
-        │
-        ├── ShopRatingSnapshot
-        ├── FbsErrorIndexSnapshot
-        ├── WebhookEvent
-        ├── DataAvailability
-        ├── DataQualityIssue
-        └── ImportBatch
-            └── ImportRowResult
-
-OzonExchangeRateInterval
-└── MoneyConversion
-
-Derived
-├── ProfitCalculationRun
-├── ForecastRun
-├── Recommendation
-└── Alert
-```
-
----
-
-# 70. 跨域关键连接字段
-
-## Product
-
-核心跨域键：
-
-```text
-product_id_internal
-sku
-offer_id
-ozon_product_id
-```
-
-其中内部关系优先使用：
-
-```text
-product_id_internal
-```
-
----
-
-## Order
-
-核心跨域键：
-
-```text
-posting_id
-posting_number
-mother_order_id
-order_number
-```
-
----
-
-## Finance
-
-优先关联：
-
-```text
-posting_number
-sku
-```
-
-必须先解析到内部：
-
-```text
-posting_id
-posting_item_id
-```
-
-无法可靠关联时：
-
-```text
-mapping_status = UNMATCHED
-```
-
-不得猜测。
-
----
-
-## Returns
-
-优先：
-
-```text
-posting_number
-return_id
-```
-
-`order_number` 可以用于辅助，但 Detail 中可能为空。
-
----
-
-## ERP Cost
-
-优先：
-
-```text
-订单编号 → posting_number
-```
-
-然后根据：
-
-```text
-平台SKU
-商品映射
-```
-
-关联到 `posting_item_id`。
-
----
-
-## Seller Logistics
-
-优先：
-
-```text
-订单号 / 发货号
-→ posting_number
-```
-
-再根据物流商原始字段关联：
-
-```text
-shipment_package_id
-logistics_provider_id
-```
-
-无法可靠识别包裹时，可以保留 Posting 级 Seller Logistics Fact，但不能猜测 SKU 归属。
-
----
-
-## Seller Catalog
-
-跨店商品通过显式：
-
-```text
-seller_catalog_product_mapping
-```
-
-关联。
-
-不得仅通过：
-
-```text
-offer_id
-name
-sku
-```
-
-自动合并。
-
----
-
-# 71. Mapping Status
+## 24.10 Mapping Status
 
 所有跨系统映射建议使用：
 
@@ -3984,49 +2228,45 @@ UNMATCHED
 UNVERIFIED
 ```
 
-例如 ERP SKU 与 Ozon 商品映射不能只返回 NULL。
+例如跨来源商品或订单映射不能只返回 NULL。
 
 必须知道为什么没有匹配。
 
 ---
 
-# 72. 数据版本
+## 24.11 数据版本
 
-以下规则必须版本化：
+当前阶段需要版本化的解释规则至少包括：
 
 ```text
 parser_version
-product_mapping_version
+mapping_version
 fulfillment_mapping_version
-finance_allocation_version
-fx_mapping_version
-cost_mapping_version
 metric_version
-forecast_model_version
-recommendation_model_version
 ```
 
-历史派生结果必须能够解释使用的是哪一版规则。
+Future Finance / Forecast / Recommendation 的版本字段在对应模型重新进入时再裁决，不提前形成 Active Contract。
+
 
 ---
 
-# 73. 不进入 Normalized Fact 的数据
+## 24.12 未验证结构
 
-以下内容在没有可靠证据前只能停留 Raw / Partial：
+以下内容在没有可靠证据前只能停留 Raw / Partial，或进入对应 Deferred Phase：
 
-- Performance Phrases 行级业务字段；
+- Performance Phrases 非空行级业务结构；
 - Analytics Stocks 非空 Item 结构；
 - Review List / Detail 当前真实字段；
 - FBS Error Posting 非空行；
 - 未验证 Webhook Payload 字段；
-- 无可靠来源的竞争对手库存；
-- 无可靠来源的竞争对手销量。
+- 无可靠来源的竞争对手库存 / 销量。
 
 不得为了“数据库字段完整”提前虚构 Schema。
 
+
 ---
 
-# 74. 数据安全边界
+## 24.13 数据安全边界
 
 数据模型不得引导任何 Ozon 写操作。
 
@@ -4051,141 +2291,320 @@ auto_bid_update
 
 等执行型业务实体。
 
-Recommendation 只表示建议。
+Future Recommendation 只表示建议，不具备 Ozon 写入能力。
 
 ---
 
-# 75. Phase 0 最低数据模型
+# 25. Phase Matrix
 
-第一阶段真正必须落地的实体至少包括：
+本节是 DATA_MODEL 的 Phase 边界。Endpoint 当前验证状态、分页、时间窗口仍以 `DATA_SOURCES.md` 为权威。
 
 ```text
-shop
-shop_capability
+Feature Delivery Phase
+!=
+Data Acquisition Phase
+```
 
-raw_payload
-sync_run
-data_quality_issue
+v1 Feature Delivery = P0 + P1。P2 Finance & Profit、P3 Growth Analytics、P4 Decision Support 不属于 v1 Feature Delivery。
 
-product
-product_identifier_history
-product_snapshot
-product_attribute_snapshot
-product_price_snapshot
-inventory_snapshot
+| Dataset / Domain | Acquisition Phase | Acquisition Policy | Backfillability | Normalized Phase | Metrics Phase | Feature Phase |
+|---|---|---|---|---|---|---|
+| Shop Info / Roles / Capability | P0 | PERIODIC_SNAPSHOT | Current-state oriented | P0 | P0/1 | P0 |
+| Product Catalog | P0 | PERIODIC_SNAPSHOT | Current state only | P0 | P1 | P1 |
+| Product Main Info | P0 | PERIODIC_SNAPSHOT | Current state only | P0/1 | P1 | P1 |
+| Product Attributes | P0 | PERIODIC_SNAPSHOT / ON_DEMAND | Current state only | P0/1 | P1/P3 consumer | P1 |
+| Product Content Rating | P0 | PERIODIC_SNAPSHOT | Current snapshot | P1 | P1/P3 consumer | P1 |
+| Price | P0 | PERIODIC_SNAPSHOT | Current state only | P1 | P1 | P1 |
+| Current Inventory | P0 | PERIODIC_SNAPSHOT | Current state only | P1 | P1 | P1 |
+| Turnover | P0 | PERIODIC_SNAPSHOT | Current / rolling analytics；历史依赖持续快照 | P1 | P1 | P1 |
+| Orders | P0 | BACKFILLABLE_SYNC | Yes, within API rules | P0/1 | P1 | P1 |
+| FBO Detail | P0 | ON_DEMAND | 按 Posting 查询可补充 | P1 | P1 | P1 |
+| Returns | P0 | BACKFILLABLE_SYNC | Yes, within API rules | P1 | P1 | P1 |
+| Analytics SKU × Day | P0 | BACKFILLABLE_SYNC | Historical date interval available | P1 | P1 | P1 |
+| Rating Current / History | P0 | PERIODIC_SNAPSHOT / BACKFILLABLE_SYNC | Current available history range | P1 | P1 | P1 |
+| FBS Error Index / Defects | P0 | PERIODIC_SNAPSHOT / BACKFILLABLE_SYNC | Current index verified；部分明细仍 PARTIAL | P1 | P1 | P1 |
+| Webhook Event | P0 | REQUIRED_CONTINUOUS | No replay guarantee | P0/1 | — | P0/1 |
+| Webhook Config / Push Types | P0 | PERIODIC_SNAPSHOT | Current state only | P0 | — | P0 |
+| Search Analytics | P0 | REQUIRED_CONTINUOUS / PERIODIC_SNAPSHOT | 可回补已保留区间；实际最大 lookback 待验证 | P3 | P3 | P3 |
+| Finance Accrual | P0 | BACKFILLABLE_SYNC | By-day backfill；长期完整保留保证不单独假设 | P2 | P2 | P2 |
+| Ozon Exchange Rate | P0 | BACKFILLABLE_SYNC / PERIODIC_SNAPSHOT | Period supported；长期稳定性未承诺 | P2 | P2 | P2 |
+| Campaign Current State | P0 | PERIODIC_SNAPSHOT | Current Campaign set；历史状态依赖快照 | P3 | P3 | P3 |
+| Campaign Interval Stats | P3* | ON_DEMAND / BACKFILLABLE_SYNC | Historical interval query available；max lookback UNVERIFIED | P3 | P3 | P3 |
+| Campaign Daily | P0 | BACKFILLABLE_SYNC | Historical date data available；max lookback UNVERIFIED | P3 | P3 | P3 |
+| Campaign SKU Daily | P0 | REQUIRED_CONTINUOUS | Today / yesterday only | P3 | P3 | P3 |
+| Performance Phrases | TBD | TBD | 当前不能作为可靠历史主来源；非空 Rows 未验证 | P3 after verification | P3 | P3 |
+| Questions / Answers | TBD | TBD | Backfillability 未验证 | P3 | P3 | P3 |
+| Reviews | P3 when available | ON_DEMAND / TBD | ACCESS_DEPENDENT；真实 List/Detail 尚未验证 | P3 | P3 | P3 |
+| Ozon Official Reports | As needed | MANUAL | Depends on Seller Center report range | Corresponding domain | Corresponding domain | Supporting source |
+| Settlement / Payout | P2 | MANUAL | Depends on Seller Center report retention；P2 = domain import support mandatory | P2 | P2 | P2 |
+| Seller Cost / ERP Actual Cost | P2 | MANUAL | Depends on user ERP export/history；P2 = domain import support mandatory | P2 | P2 | P2 |
+| Seller Logistics Cost | P2 | MANUAL | Depends on logistics provider bill/export；P2 = domain import support mandatory | P2 | P2 | P2 |
+| Package Measurement | P2 / As needed | MANUAL | Source-dependent | P2 / As needed | P2 | P2 |
+| In-transit Inventory | P1 manual path / TBD automatic | MANUAL / TBD automatic | Source-dependent；必须保存状态历史 | P1 | P1 | P1 |
+| Seller Catalog Mapping | Later / when needed | MANUAL | User-maintained；保存 validity/history | Later | Later | Later |
 
-mother_order
-posting
-posting_item
-posting_status_history
-cancellation
+## 25.1 Priority Vocabulary
 
-return_case
-return_item
+Priority 只允许：
 
+```text
+CRITICAL_CAPTURE
+NORMAL
+```
+
+`P0`–`P4` 只表示 Phase，不得作为 Priority。
+
+`CRITICAL_CAPTURE` 只用于不可回补或极短回补窗口的数据。当前明确包括：
+
+```text
+Webhook Event
+Campaign SKU Daily
+```
+
+其他 Dataset 默认 `NORMAL`；如后续真实窗口验证证明存在不可接受的数据丢失风险，再依据 Architecture Dataset Contract 调整 Priority。不能因为 Acquisition Phase = P0 就自动标记为 `CRITICAL_CAPTURE`。
+
+## 25.2 P1 保护项
+
+以下内容不得在 Phase 污染清理中误删：
+
+```text
+Product Content Rating
+In-transit Inventory manual path
+Analytics SKU × Day / sku_daily_analytics
+```
+
+其中 Search Analytics / Advertising 仍属于 P3 Normalized / Feature Phase。
+
+---
+
+# 26. Identity & Key Rules
+
+## 26.1 数据库级唯一性
+
+自然业务身份必须由数据库强制唯一，不能只依赖 Application Code 去重。
+
+允许：
+
+```text
+Composite PRIMARY KEY
+Composite UNIQUE
+Surrogate PRIMARY KEY + Composite UNIQUE
+```
+
+`Identity Constraint` 与 `Performance Index` 分离：
+
+```text
+PRIMARY KEY / UNIQUE
+→ identity correctness
+
+INDEX
+→ query performance
+```
+
+查询索引继续遵循 Query-driven Index，不机械复制自然键约束。
+
+## 26.2 当前已裁决自然业务身份
+
+| 实体 | 数据库级业务身份 |
+|---|---|
+| Shop | `UNIQUE(ozon_client_id)` |
+| Product | `UNIQUE(shop_id, ozon_product_id)` |
+| MotherOrder | `UNIQUE(shop_id, order_number)` |
+| Posting | `UNIQUE(shop_id, posting_number)` |
+| ReturnCase | `UNIQUE(shop_id, return_source_type, source_return_id)` |
+| SKU Daily Analytics | `UNIQUE(shop_id, sku, business_date)` |
+| PostingItem | 保留 Internal Identity；不伪造 SKU 自然键 |
+
+Product 保留 `product_id_internal`。MotherOrder / Posting 不因为存在自然键就强制取消或强制增加 Surrogate ID；实现可以基于工程需要选择，但上述业务身份约束必须存在。
+
+## 26.3 当前 Active 核心关系
+
+以下为核心关系示意，不是对所有技术 / 子实体的穷举清单。
+
+```text
+Shop
+├── ShopCapability
+├── Product
+│   ├── ProductIdentifierHistory
+│   ├── ProductSnapshot
+│   ├── ProductAttributeSnapshot
+│   ├── ProductContentRatingSnapshot
+│   │   └── ProductContentRatingGroup
+│   ├── ProductPriceSnapshot
+│   ├── InventorySnapshot
+│   ├── InventoryTurnoverSnapshot
+│   └── SkuDailyAnalytics
+├── MotherOrder
+│   └── Posting
+│       ├── PostingItem
+│       │   └── PostingItemPricingObservation
+│       ├── PostingStatusHistory
+│       ├── PostingScheduleHistory
+│       ├── Cancellation
+│       ├── LogisticsEvent
+│       ├── ShipmentPackage
+│       ├── ReverseLogisticsLink
+│       └── ReturnCase
+│           ├── ReturnItem
+│           └── ReverseLogisticsEvent
+├── Warehouse
+├── LogisticsProvider
+├── DeliveryMethod
+├── ShopRatingSnapshot
+├── FbsErrorIndexSnapshot
+├── FbsErrorDefectDaily
+├── WebhookPushType
+├── WebhookEvent
+├── DataAvailability
+├── DataQualityIssue
+├── ReconciliationResult
+├── Alert
+└── ImportBatch
+    └── ImportRowResult
+```
+
+Seller Catalog、Inbound Supply、Finance、Advertising、Questions / Answers、Forecast / Recommendation 不属于当前 Active 关系图。
+
+## 26.4 跨域关键连接
+
+Product 主要通过 `product_id_internal` 连接内部 Fact，同时保留 `sku` / `offer_id` / `ozon_product_id` 作为来源身份与匹配字段。
+
+Order 以 `posting_number` / Posting 为业务连接核心，MotherOrder 负责聚合。
+
+Return 优先通过 `posting_number` / `posting_id` 与 `source_return_id` 连接；无法可靠匹配时必须保留 `UNMATCHED / UNVERIFIED`，不得猜测。
+
+不同 Shop 商品不得只通过 `offer_id`、SKU 或名称自动合并。
+
+---
+
+# 27. Acceptance Criteria
+
+在数据库正式实现前，本模型必须满足：
+
+- [ ] 所有 Ozon 业务 Fact 都有明确 Shop Scope；
+- [ ] 自动来源 Raw metadata 统一由 `raw_capture` 表达；
+- [ ] Raw lineage 统一使用 `raw_ref`，且 `raw_ref → raw_capture.raw_capture_id`；
+- [ ] SQLite 不长期保存完整 API / Webhook Raw Body；
+- [ ] 不存在第二套 Raw Storage Locator Authority；
+- [ ] `posting_item` 与 `return_item` 不保存行级 Raw Body 副本；
+- [ ] Future Finance 不恢复 Raw Component Body-in-row 模式；
+- [ ] 所有 `*_json` 字段均已归类为 RAW_BODY / NORMALIZED_STRUCTURED_SNAPSHOT / DIAGNOSTIC_OR_DERIVED_CONTEXT；
+- [ ] Snapshot JSON 有明确业务语义，不因 ADR-001 被误删；
+- [ ] Diagnostic / Derived JSON 只保存 bounded context，不变相保存 Raw Payload；
+- [ ] 自然业务身份由数据库级 PRIMARY KEY / UNIQUE 保证；
+- [ ] Identity Constraint 与 Performance Index 分离；
+- [ ] Product ID / SKU / offer_id 不混用；
+- [ ] MotherOrder / Posting 不混用；
+- [ ] PostingItem 不伪造 `(posting_id, sku)` 唯一性；
+- [ ] `product_snapshot` 与 `product_attribute_snapshot` 双表保留；
+- [ ] Seller Catalog 不属于当前 Active Schema；
+- [ ] 跨店商品不通过弱标识自动合并；
+- [ ] Inbound Supply 两级 Schema 不属于当前 Active Schema；
+- [ ] In-transit Inventory 仍是 P1 独立数据域，manual path 未被误删，automatic source 保持 TBD；
+- [ ] Warehouse / Logistics Provider / Delivery Method / Shipment Package 保留为 Core Operations；
+- [ ] `sku_daily_analytics` 继续属于 P1 Active Normalized Model；
+- [ ] Analytics Daily 未与 P3 Search / Advertising Analytics 一并 Deferred；
+- [ ] `cancellation` 继续作为独立业务事实，收纳于 Posting，不与 Return 合并；
+- [ ] Product Content Rating 的 P1 定位未被误删；
+- [ ] Webhook Event 保持 P0 REQUIRED_CONTINUOUS，并通过 Seller API readback / reconciliation 校准业务最终状态；
+- [ ] Priority 只使用 `CRITICAL_CAPTURE / NORMAL`；
+- [ ] `P0`–`P4` 只作为 Phase 使用；
+- [ ] P2 / P3 / Later 完整 Normalized Entity 不再污染 v1 Active Model；
+- [ ] Future Feature 的 Early Raw Acquisition 仍按 Phase Matrix 保留；
+- [ ] Current Inventory 与 In-transit Inventory 不混用；
+- [ ] Product Weight、Package Weight、Chargeable Weight 不混用；
+- [ ] Snapshot 与 Fact 区分；
+- [ ] 无权限 / 未验证 / 空集合不会被存成业务 0；
+- [ ] 空集合不会触发无条件历史删除；
+- [ ] Ozon 集成保持严格只读；
+- [ ] DATA_MODEL 与 ADR-001、`ARCHITECTURE.md`、Batch 0 Phase Matrix 无冲突。
+
+---
+
+# 28. Deferred Model Register
+
+Deferred 不等于删除数据采集。Early Raw Acquisition 继续以 §25 Phase Matrix 为准。
+
+## 28.1 Seller Catalog — Later
+
+当前不建立完整：
+
+```text
+seller_catalog_item
+seller_catalog_product_mapping
+```
+
+Active 约束仅保留：不同 Shop 商品不得通过相同 SKU / offer_id / name 自动认定为同一商品。
+
+重新进入条件：出现明确跨店统一商品身份需求，且真实业务证明 Shop-scoped Product 无法满足。
+
+## 28.2 Inbound Supply Normalized Model — Deferred
+
+当前不建立完整：
+
+```text
+inbound_supply
+inbound_supply_item
+```
+
+Reason：当前只有 In-transit Inventory 数据域要求，自动 Ozon 来源与两级身份模型尚未验证。
+
+重新进入条件：
+
+1. Ozon 自动入库计划来源完成真实验证；或
+2. P1 Manual In-transit Inventory 实际输入格式确定；
+3. 且真实数据证明需要 Supply / SupplyItem 两级身份模型。
+
+## 28.3 Phase 2 — Finance & Profit
+
+以下完整 Normalized / Derived Schema 不属于 v1 Active Model：
+
+```text
 finance_accrual_type
 finance_accrual
 finance_component
-
-sku_daily_analytics
-sku_search_period_analytics
-sku_search_query_analytics
-inventory_turnover_snapshot
-
-advertising_account
-ad_campaign
-ad_campaign_snapshot
-ad_campaign_daily_metric
-ad_campaign_sku_daily_metric
-
-shop_rating_snapshot
-
-question
-answer
-
-webhook_event
-
+finance_allocation
 ozon_exchange_rate_interval
-
-import_batch
-import_row_result
-
-seller_catalog_item
-seller_catalog_product_mapping
-
-warehouse
-logistics_provider
-delivery_method
-
-inbound_supply
-inbound_supply_item
-
-shipment_package
+money_conversion
 seller_logistics_charge
-
 seller_sku_cost
 order_item_cost
-
 settlement_period
 payout
-
-posting_item_pricing_observation
-posting_schedule_history
-
-data_availability
-```
-
-其他 Derived 实体可在对应 Phase 实施。
-
----
-
-# 76. Phase 1 扩展
-
-Core Operations 阶段增加或强化：
-
-```text
-logistics_event
-reverse_logistics_link
-reverse_logistics_event
-fbs_error_index_snapshot
-fbs_error_defect_daily
-alert
-```
-
----
-
-# 77. Phase 2 扩展
-
-Finance & Profit 阶段增加：
-
-```text
-finance_allocation
-money_conversion
 profit_calculation_run
 order_profit
 order_item_profit
 ```
 
----
+Finance Accrual / Ozon Exchange Rate 等 P0 Early Acquisition 仍按 §25 保存 Raw Capture；Settlement / Payout、Seller Cost、Seller Logistics Cost 等 Manual Domain 从 P2 起必须正式支持领域 Parser / Persistence。
 
-# 78. Phase 3 扩展
+Future Finance redesign 禁止恢复 Raw Body-in-row 字段，来源正文统一通过 `raw_ref` 追溯。
 
-Growth Analytics 阶段增加：
+## 28.4 Phase 3 — Growth Analytics / Customer Voice
+
+以下完整 Schema 当前不建立：
 
 ```text
-review
+sku_search_period_analytics
+sku_search_query_analytics
+advertising_account
+ad_campaign
+ad_campaign_snapshot
+ad_campaign_daily_metric
+ad_campaign_period_metric
+ad_campaign_sku_daily_metric
 ad_campaign_object
-VOC derived models
-product optimization outputs
+question
+answer
+review
+performance_phrase_row
 ```
 
-仅当对应数据源已经可用。
+Search / Campaign 的 Early Acquisition 继续按 §25；Questions / Answers Acquisition 与 Backfillability 保持 `TBD`；Reviews 保持 access-dependent。
 
----
+## 28.5 Phase 4 — Decision Support
 
-# 79. Phase 4 扩展
-
-Decision Support 增加：
+以下模型进入 P4 后再重新设计：
 
 ```text
 forecast_run
@@ -4194,187 +2613,66 @@ forecast_backtest
 recommendation
 ```
 
----
-
-# 80. DATA_MODEL 与 METRICS 的边界
-
-DATA_MODEL 定义：
-
-```text
-数据是什么
-数据之间什么关系
-数据如何追溯
-```
-
-METRICS 定义：
-
-```text
-如何计算
-```
-
-例如产品退货率：
-
-DATA_MODEL 只需要保证存在：
-
-```text
-PostingItem
-ReturnItem
-ReturnCase
-Product
-Time
-```
-
-至于：
-
-- 分子；
-- 分母；
-- 件数口径；
-- 订单口径；
-- 跨期处理；
-
-全部进入 `METRICS.md`。
+不因为未来可能使用而提前冻结 v1 数据表。
 
 ---
 
-# 81. DATA_MODEL 与 DATA_SOURCES 的边界
+# 29. 文档边界与开放项
 
-DATA_SOURCES 定义：
+## 29.1 DATA_MODEL 与 METRICS
 
-```text
-数据从哪里来
-来源能提供什么
-来源有哪些限制
-```
+DATA_MODEL 定义数据是什么、身份是什么、如何追溯；`METRICS.md` 定义如何计算。
 
-DATA_MODEL 定义：
+例如产品退货率所需的 PostingItem / ReturnItem / ReturnCase / Product / Time 由本模型保证，分子、分母、跨期、件数口径由 `METRICS.md` 定义。
 
-```text
-拿到以后怎么统一保存
-```
+## 29.2 DATA_MODEL 与 DATA_SOURCES
 
-因此任何新增实体必须能够回溯到：
+`DATA_SOURCES.md` 定义来源能提供什么、当前验证状态、分页、时间窗口和已知边界；DATA_MODEL 只定义取得数据后的统一保存方式。
+
+任何新增 Active Entity 必须能够回溯到：
 
 - 已验证数据源；
 - 卖家明确提供的数据；
 - 明确的 Derived 过程。
 
----
+## 29.3 当前开放问题
 
-# 82. 当前跨文档同步状态
-
-本版与 `DATA_SOURCES.md v1.0` 已同步以下内容：
-
-1. Ozon Exchange Rate XAPI；
-2. Ozon Business FX 与 Seller Cost FX 分离；
-3. 马帮 ERP 订单商品实际采购成本 Adapter；
-4. ERP 成本支持订单级历史；
-5. Seller Cost Currency / FX Mapping 版本化；
-6. 物流商 / 卖家物流费用作为 Seller-Owned Data；
-7. 包裹实际重量、体积重量和计费重量分层；
-8. 在途库存 / Inbound Supply；
-9. Ozon 官方结算与付款文件作为 Settlement / Payout 的人工来源；
-10. 发货截止时间和承诺配送窗口历史；
-11. 跨店 Seller Catalog 显式映射。
-
-后续 `METRICS.md` 应直接建立在上述数据模型上，不再重新发明另一套成本、汇率、库存或退货基础结构。
-
----
-
-# 83. 当前待验证的数据模型问题
-
-以下问题保持开放，不在 v1.0 中猜测：
+以下问题继续保持开放，不在 A.2 猜测：
 
 1. Analytics Stocks 非空结构；
 2. Performance Phrases 非空结构；
 3. Review List / Detail 真实结构；
 4. FBS Error Posting 非空结构；
 5. Webhook 各 Push Type 完整 Payload；
-6. Type 29 / 32 在 Finance 多 SKU Posting 中的实际粒度；
-7. Ozon Exchange Rate XAPI 的长期稳定性；
-8. 马帮 ERP 未来版本中 `汇率(原币)` 的字段语义是否保持一致；
-9. 其他 ERP / Seller Cost Source 的成本基准币种；
-10. WHD 二次销售与原退货的可靠一对一关联字段；
-11. Ozon Inbound Supply 是否存在稳定且完整的只读 API Contract；
-12. 物流商导出数据对 Posting / Package 的稳定关联键；
-13. 不同履约模式下包裹实际重量、体积重量和计费重量来源优先级；
-14. Settlement / Payout 是否存在可替代人工报告的稳定只读 API；
-15. 跨店 Seller Catalog 自动辅助匹配规则的可靠边界。
+6. Ozon Exchange Rate XAPI 的长期稳定性；
+7. WHD 二次销售与原退货的可靠一对一关联字段；
+8. In-transit Inventory 自动 Ozon 来源；
+9. 物流商导出对 Posting / Package 的稳定关联键；
+10. Settlement / Payout 是否存在可替代人工报告的稳定只读 API；
+11. Questions / Answers 的历史 Backfillability。
 
 ---
 
-# 84. 数据模型验收原则
+# 30. 核心原则
 
-在数据库正式实现前，本模型必须满足：
+**Automatic Source 先完成 durable Raw Capture，再建立业务解释。**
 
-1. 所有 Ozon 业务 Fact 都有 Shop；
-2. 所有 Source Key 与 Internal ID 分离；
-3. Product ID / SKU / offer_id 不混用；
-4. MotherOrder / Posting 不混用；
-5. FBP / realFBS / OGL 与 API 技术 schema 分离；
-6. WHD 不进入正常首次履约模式；
-7. Finance SKU Fact 与 Posting Fact 分离；
-8. Posting 级费用不会伪造成 SKU 原始费用；
-9. Ozon FX 与 Seller Cost FX 分离；
-10. 原始 Money 不被换算金额覆盖；
-11. 历史采购成本不会被当前成本覆盖；
-12. ERP Cost 可以关联到具体 Posting Item；
-13. Webhook Raw Payload 可追溯；
-14. Webhook 不作为最终状态唯一来源；
-15. 无权限数据不会存成 0；
-16. 空集合不会触发无条件历史删除；
-17. Snapshot 与 Fact 区分；
-18. 派生结果具有规则版本；
-19. 每个正式指标都有可追溯数据基础；
-20. 未验证接口不会提前生成虚假业务字段；
-21. Product Weight、Package Weight、Chargeable Weight 不混用；
-22. Ozon Finance Logistics Fee 与 Seller Logistics Cost 分离；
-23. 当前库存与在途库存分离；
-24. Posting 当前承诺时间不会覆盖其历史承诺时间；
-25. Settlement / Payout 不会由 Accrual 推断伪造；
-26. 跨店商品只通过显式 Seller Catalog Mapping 合并；
-27. FX Conversion 明确保存 Rate Basis；
-28. 所有 Ozon 集成保持严格只读。
+**Raw Body 只有一个长期物理路径；SQLite 只保存 capture metadata / lineage。**
 
----
+**人工导入是一次性 Import Medium，不进入长期 Raw Store。**
 
-# 85. 核心原则
+**Internal ID 逐实体裁决，自然业务身份必须由数据库强制唯一。**
 
-**自动数据源先保存原始事实，再建立业务解释。**
-
-**人工导入保留导入后的结构化数据和导入记录，不保存原文件本体。**
-
-**内部身份与外部字段分离。**
-
-**订单以 Posting 为核心连接点，母订单负责聚合。**
+**订单以 Posting 为核心连接点，MotherOrder 负责聚合。**
 
 **商品三个标识全部保留，不把 offer_id 当永久主键。**
 
 **技术履约模式不等于业务履约模式。**
 
+**Cancellation 是 Posting 独立事实，不与 Return 混合。**
+
 **WHD 属于逆向物流。**
 
-**Finance 的原始粒度不得被分摊结果替代。**
+**Current Inventory 与 In-transit Inventory 分离。**
 
-**原始金额永远保留原币。**
-
-**Ozon Business FX 与 Seller Cost FX 永远分离。**
-
-**历史订单优先使用历史实际采购成本。**
-
-**Product Weight、Package Weight 与 Chargeable Weight 分离。**
-
-**Ozon Finance 物流费用与卖家实际物流成本分离。**
-
-**当前库存与在途库存分离。**
-
-**跨店商品只通过显式 Seller Catalog 映射合并。**
-
-**汇率必须记录适用时间依据，而不是只有一个笼统业务时间。**
-
-**未知不等于 0。**
-
-**无法可靠关联时标记 Unmatched，不猜测。**
-
-**所有派生结果必须可以重新计算和解释。**
-
-**O3Pilot 永远只读 Ozon。**
+**未来阶段不可回补数据可以提前 Raw Capture，但不能提前冻结未来完整 Normalized Schema。**

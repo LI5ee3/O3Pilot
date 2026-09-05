@@ -3,7 +3,8 @@
 > Version: 1.0  
 > Status: Draft for Review  
 > Updated: 2026-09-04  
-> Applies to: O3Pilot
+> Applies to: O3Pilot  
+> B.3 Remediation: 2026-09-05 — Session Revoked projection/QA aligned to `SECURITY.md` v1.1 multi-session semantics; scope limited to §4.11 and §37. Parent baseline: `cd8f5d8aa91a586ca73b290e79b67d24d27dc487bfcaa7fc65fef57e98db3ad0`.
 
 # 1. 文档目的
 
@@ -770,15 +771,17 @@ Business Date / Date-only Semantic
 → 保留来源业务日期语义
 ```
 
-## 4.11 Single Active Session
+## 4.11 Session Revoked
 
-当当前 Session 被新登录撤销：
+当当前 Session 按 `SECURITY.md` 定义的 Session 语义失效或被撤销：
 
 - 不弹普通 Error Toast；
 - 不保留半可操作页面；
 - 立即进入 Session Revoked 状态；
 - 引导重新登录；
 - 不泄漏原页面敏感数据。
+
+Session 撤销原因由 `SECURITY.md` 定义；`DESIGN.md` 只负责失效后的 UI 投影。
 
 ---
 
@@ -21046,9 +21049,9 @@ Login page
 
 # 37. Session Revoked
 
-O3Pilot v1 使用 Single User / Single Active Session。
+O3Pilot v1 使用 Single User / Multiple Active Server-side Sessions。
 
-新的有效登录建立后，旧 Session 必须立即失效。
+Session 的建立、撤销与失效语义由 `SECURITY.md` 定义；`DESIGN.md` 不定义撤销原因，只投影当前 Session 已失效后的界面状态。
 
 Session Revoked 是 Security State Page，不是普通 Error Toast。
 
@@ -21071,7 +21074,7 @@ User must authenticate again to continue
 │                                                            │
 │                    当前会话已结束                          │
 │                                                            │
-│       此实例已建立新的有效登录会话。                      │
+│       当前会话已不再有效。                                │
 │       为保护业务数据，请重新登录后继续。                  │
 │                                                            │
 │                       [ 重新登录 ]                         │
@@ -21079,7 +21082,7 @@ User must authenticate again to continue
 └────────────────────────────────────────────────────────────┘
 ```
 
-文案可以按具体 Security Reason 调整，但不能显示不可信的设备推断。
+如 `SECURITY.md` 提供可安全展示的具体 Security Reason，文案可以据此调整；`DESIGN.md` 不自行推断或定义撤销原因，也不能显示不可信的设备推断。
 
 ## 37.3 Business Data Visibility
 
@@ -21171,12 +21174,28 @@ Reduced Motion 与 Standard Motion 行为都应快速进入最终状态。
 
 ## 37.8 Session Revoked QA
 
-至少覆盖：
+至少覆盖两个独立场景。
+
+### Scenario A — Multiple Active Sessions
 
 ```text
 Login A active
 Login B succeeds
-A becomes revoked
+A remains valid
+B remains valid
+```
+
+该场景只验证 `SECURITY.md` 已定义的多 Session 语义，不由 DESIGN 新增 Session 生命周期规则。
+
+### Scenario B — Revoked-state UI
+
+使用一个 `SECURITY.md` 已定义的 Session invalidation event 作为测试 fixture，例如 Password Change：
+
+```text
+Session active
+SECURITY-defined invalidation event occurs
+Current Session becomes invalid
+Session Revoked page shown
 Business content disappears
 Global Search unavailable
 Open Drawer removed

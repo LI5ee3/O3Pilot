@@ -1,117 +1,494 @@
 # O3Pilot — METRICS.md
 
-> Version: 1.0  
-> Status: Metric Contract Baseline  
-> Updated: 2026-09-03  
+> Version: 1.1  
+> Status: Active Metric Baseline  
+> Updated: 2026-09-05  
+> Revision: Batch A.3  
 > Applies to: O3Pilot
+
+---
 
 # 1. 文档目的
 
-`METRICS.md` 定义 O3Pilot 的统一指标口径、计算规则、时间归属、聚合方式、状态语义和指标版本。
+`METRICS.md` 定义 O3Pilot 当前正式指标的唯一口径、计算规则、时间语义、聚合方式、结果状态和版本语义。
 
 本文件负责回答：
 
-- 一个指标到底在计算什么；
-- 分子和分母是什么；
-- 使用哪个业务时间；
-- 统计粒度是什么；
-- Money 使用什么币种；
-- 是否来自 Ozon 原始指标；
-- 是否由 O3Pilot 自己计算；
-- 是否属于估算；
-- 缺失值、0、未知和无权限如何区分；
-- 多店铺、多 SKU、多币种如何聚合；
-- 历史指标如何重算；
-- Profit、Return、Inventory、Advertising、Forecast 等指标如何避免重复计费或口径混乱。
+- 当前 P0 / P1 哪些 Metric 是正式 Active；
+- 一个 Metric 的身份、来源或计算公式是什么；
+- 分子、分母、资格规则和排除规则是什么；
+- 使用哪个业务时间、粒度和币种；
+- Source、Ozon Reference、O3Pilot Derived、Estimate 如何区分；
+- Missing、0、未知、无权限、未验证、开放 Cohort 如何区分；
+- Ratio、Money、Percentile 如何正确聚合；
+- Persisted Derived Result 如何保留历史重算能力；
+- Deferred Metric 何时允许重新进入 Active Baseline。
 
 本文件不定义：
 
-- 数据从哪里获取；
-- 数据库 Schema；
-- API Endpoint；
-- 同步周期；
-- Scheduler / Worker；
-- 页面布局；
-- 具体告警阈值；
-- 预测模型实现代码；
-- 自动执行任何 Ozon 写操作。
+- API Endpoint、Pagination、真实历史窗口和 Endpoint Verification；
+- 数据库实体、字段、自然键和 Source Lineage Schema；
+- 数据采集频率、Scheduler、Worker、Job 实现；
+- 页面布局和视觉交互；
+- Alert / Recommendation 的业务触发阈值和策略生命周期；
+- Forecast 模型实现；
+- 任何 Ozon 写操作。
 
-这些内容分别由 `DATA_SOURCES.md`、`DATA_MODEL.md`、`ARCHITECTURE.md`、`DESIGN.md` 等文档定义。
+这些内容分别由 `DATA_SOURCES.md`、`DATA_MODEL.md`、`ARCHITECTURE.md`、`DESIGN.md`、`ALERTS_AND_RECOMMENDATIONS.md`、`FORECASTING.md` 等对应 Authority 定义。
 
----
-
-# 2. 指标设计总原则
-
-## 2.1 一个名字只能对应一个口径
-
-禁止出现：
-
-```text
-销售额
-```
-
-在不同页面分别代表：
-
-- Ozon Analytics Revenue；
-- 订单标价；
-- Buyer Paid；
-- Finance Gross Sales；
-- Finance Net Accrual；
-- Profit Revenue。
-
-必须使用明确指标名称和 Metric Code。
+O3Pilot 对 Ozon 永久保持只读。
 
 ---
 
-## 2.2 Ozon 官方指标与 O3Pilot 自算指标分离
+# 2. Upstream Authorities & Frozen Constraints
 
-Ozon Seller Center、Seller API、Performance API 返回的官方指标，不得因为 O3Pilot 可以自行计算近似值，就被覆盖成同一个指标。
+A.3 的迁移依据来自 Batch 0 Final，但 A.3 完成后，当前 Metric Contract 的正式含义必须由本文件自身完整表达；实现者不需要再次读取 Batch 0 才能解释当前 Metric Contract。
 
-例如：
+| Authority | Single Authority Area |
+|---|---|
+| `PRODUCT.md` | 产品能力边界与 Feature Phase |
+| `DATA_SOURCES.md` | Endpoint、Pagination、Backfillability 证据、真实窗口与验证状态 |
+| `DATA_MODEL.md` | Active Schema、业务身份、Source Lineage 与跨层 Phase 执行映射 |
+| `ARCHITECTURE.md` | Runtime、数据流、Time Semantics 与 Observability |
+| Batch 0 Final | 本次 A.3 迁移的冻结溯源与执行依据 |
+| `METRICS.md` | 当前正式 Metric Registry、Definition Contract、Result Semantics 与计算规则 |
+
+本文件消费上述 Authority，不独立重定义 Feature Phase、Endpoint 能力或底层 Schema。
+
+Batch 0 对 A.3 的有效冻结约束已吸收如下：
 
 ```text
-Ozon Official Buyout Rate
-!=
-O3Pilot Buyout Rate
+v1 Feature Delivery = P0 + P1
+
+Feature Phase != Acquisition Phase
+
+Unified Metric Contract:
+17 fields
+→
+Source Contract = 8 fields
+Derived Contract = 9 fields
+
+Future-phase formal Metric definitions in v1 Active Body = 0
+
+One Name = One Meaning
+
+OZON_REFERENCE remains distinct
+
+Ozon remains read-only
 ```
 
-```text
-Ozon Availability
-!=
-O3Pilot Availability
-```
+Metric Phase 的直接执行映射以当前 `DATA_MODEL.md §25` 为准，并必须与 `PRODUCT.md` 的 Feature Phase Authority 一致。
+
+特别注意：
 
 ```text
-Ozon Shipment Delay Rating
-!=
-O3Pilot On-time Handover Rate
+Search Analytics
+Acquisition = P0
+Metrics / Feature = P3
+```
+
+以及：
+
+```text
+Campaign SKU Daily
+Acquisition = P0
+Feature = P3
+```
+
+提前采集不意味着提前实现对应 Metric。
+
+---
+
+# 3. Metric Identity 与 Origin
+
+## 3.1 One Name = One Meaning
+
+一个 `metric_code` 只能对应一个正式口径。
+
+不得让同一个 Code 在不同页面、来源或时间窗口下静默改变：
+
+- 分子；
+- 分母；
+- Eligibility；
+- Exclusions；
+- Time Basis；
+- Currency；
+- Formula。
+
+UI 显示名称变化不得自动改变 `metric_code`。
+
+---
+
+## 3.2 Active `metric_origin`
+
+当前 Active Metric Origin 只有：
+
+```text
+OZON_SOURCE
+OZON_REFERENCE
+O3P_DERIVED
+O3P_ESTIMATE
+```
+
+`O3P_FORECAST` 随 P4 Forecast 一并 Deferred，不属于当前 Active Origin 集。
+
+### `OZON_SOURCE`
+
+Ozon API / 已验证 Ozon Source 直接返回且 O3Pilot 不改变语义的值。
+
+### `OZON_REFERENCE`
+
+Ozon 官方知识库、Seller Center 或官方报告明确给出的指标、公式或参考口径。
+
+### `O3P_DERIVED`
+
+O3Pilot 根据已标准化 Fact 按确定公式计算。
+
+### `O3P_ESTIMATE`
+
+依赖估算假设、缺失补全或近似业务模型。
+
+Estimate 必须通过 Result `status` 或等价可识别语义向用户暴露，不得伪装成 Source Fact。
+
+---
+
+## 3.3 `metric_origin != contract_shape`
+
+Origin 描述指标语义来源；Contract Shape 描述这个指标如何被 O3Pilot 表达。
+
+正式规则：
+
+```text
+OZON_SOURCE
+→ SOURCE
+
+O3P_DERIVED
+→ DERIVED
+
+O3P_ESTIMATE
+→ DERIVED
+```
+
+`OZON_REFERENCE` 根据实际形态选择：
+
+```text
+官方直接可指认观察值 / 字段
+→ SOURCE
+
+O3Pilot 按官方公布公式复算
+→ DERIVED
+```
+
+`OZON_REFERENCE + SOURCE` 必须存在可指认的官方 `source_field`；禁止为了满足 Source 8 而填写虚假的 `N/A` 来源字段。
+
+---
+
+# 4. Metric Registry 与 Definition Contract
+
+## 4.1 Metric Registry — 6 fields
+
+Metric Registry 只承担身份与治理元数据：
+
+```text
+metric_code
+display_name
+metric_origin
+contract_shape
+domain
+feature_phase
+```
+
+Registry 不重复维护 `grain`、`time_basis`、`unit` 等 Definition Contract 字段。
+
+---
+
+## 4.2 Source Contract — 8 fields
+
+所有 `contract_shape = SOURCE` 的正式 Metric 必须完整定义：
+
+```text
+metric_code
+source
+source_field
+grain
+time_basis
+unit
+currency_policy
+aggregation_rule
 ```
 
 ---
 
-## 2.3 Ratio 不平均 Ratio
+## 4.3 Derived Contract — 9 fields
 
-跨 SKU、跨店铺、跨日期聚合比例时，必须重新聚合分子和分母。
+所有 `contract_shape = DERIVED` 的正式 Metric 必须完整定义：
+
+```text
+metric_code
+grain
+time_basis
+formula
+eligibility
+unit
+currency_policy
+aggregation_rule
+metric_version
+```
+
+当前 v1.1 Active Derived Metric 若无单独说明，初始：
+
+```text
+metric_version = 1
+```
+
+任何公式语义变化必须提升版本，不能覆盖旧 Result 的解释能力。
+
+---
+
+## 4.4 Optional Extensions
+
+Batch 0 Frozen：
+
+```text
+numerator
+denominator
+exclusions
+coverage
+```
+
+A.3 基于当前真实 Active Metric 额外保留：
+
+```text
+window
+```
+
+`window` 的保留理由是当前 ADS、Availability、Lost Sales 和 Ozon Reference 中存在真实窗口依赖；删除会直接丢失指标口径。
+
+`dimensions` 从 Active Contract 移除。
+
+重新进入条件：
+
+> 出现真实 Active Metric，证明合法切片无法由 `grain` + 明确 Variant / Result Context 表达时，再重新 Review。
+
+任何未来新增 Contract 字段必须同时说明：
+
+1. 字段名；
+2. 真实使用证据；
+3. 现有字段为什么无法表达；
+4. Required / Optional。
+
+禁止使用没有明确边界的兜底字段重新扩张 Contract。
+
+---
+
+## 4.5 旧 17 字段迁移
+
+| Old Field | v1.1 Authority |
+|---|---|
+| `metric_code` | Source / Derived Contract |
+| `display_name` | Metric Registry |
+| `metric_origin` | Metric Registry |
+| `domain` | Metric Registry |
+| `grain` | Source / Derived Contract |
+| `dimensions` | Removed from Active Contract；Deferred with Re-entry Gate |
+| `time_basis` | Source / Derived Contract |
+| `window` | A.3 justified Optional Extension |
+| `numerator` | Optional Extension |
+| `denominator` | Optional Extension |
+| `unit` | Source / Derived Contract |
+| `currency_policy` | Source / Derived Contract |
+| `eligibility` | Derived Contract |
+| `exclusions` | Optional Extension |
+| `aggregation_rule` | Source / Derived Contract |
+| `metric_version` | Derived Contract |
+| `status` | Metric Result Semantics |
+
+迁移结果：
+
+```text
+17 / 17 mapped
+```
+
+Source 8 中的：
+
+```text
+source
+source_field
+```
+
+不是旧 17 字段迁移项；它们是 Batch 0 拆分 Source Contract 后冻结的来源指针。
+
+---
+
+# 5. Metric Result Semantics
+
+本文件不建立第三套“六字段强制 Result Contract”。
+
+所有正式 Metric Result 必须能够表达：
+
+```text
+value
+status
+```
+
+该要求同样适用于 `OZON_SOURCE`：`value` 为 Source Value，`status` 表达该结果当前是否可用、可靠或适用。
+
+以下字段按 Metric 适用性提供：
+
+```text
+sample_count
+eligible_count
+coverage_ratio
+as_of_time
+```
+
+当前统一结果状态：
+
+```text
+VALID
+PARTIAL
+UNAVAILABLE
+NOT_APPLICABLE
+UNVERIFIED
+STALE
+ESTIMATED
+NO_DENOMINATOR
+NO_RECENT_DEMAND
+OPEN_COHORT
+```
+
+Missing / Unknown 不得被写成业务 `0`。
+
+Denominator 为 0：
+
+```text
+value = NULL
+status = NO_DENOMINATOR
+```
+
+库存覆盖天数在近期有效需求为 0 时：
+
+```text
+value = NULL
+status = NO_RECENT_DEMAND
+```
+
+当同一个 Result 同时存在多个风险时，建议主状态优先级：
+
+```text
+UNAVAILABLE
+UNVERIFIED
+STALE
+PARTIAL
+ESTIMATED
+OPEN_COHORT
+VALID
+```
+
+这是建议优先级，不替代 Metric-specific 状态语义。
+
+Ratio 展示至少应能查看：
+
+```text
+value
+numerator
+denominator
+period
+status
+```
+
+Percentile 展示至少应能查看：
+
+```text
+value
+sample_count
+period
+status
+```
+
+Money 展示至少应能查看：
+
+```text
+amount
+currency
+period
+```
+
+---
+
+# 6. Historical Recalculation Invariant
+
+触发条件：
+
+```text
+Persisted Metric Result
+AND
+contract_shape = DERIVED
+```
+
+必须能够追溯：
+
+```text
+metric_code
+metric_version
+calculated_at
+source_coverage
+```
+
+这条规则同时覆盖：
+
+- `O3P_DERIVED`；
+- `O3P_ESTIMATE`；
+- `OZON_REFERENCE + DERIVED`。
+
+METRICS 不再要求所有派生结果拥有通用：
+
+```text
+calculation_run_id
+```
+
+如果未来某个 Domain 存在真实 Run Entity，其关系由该 Domain / `DATA_MODEL.md` 单独定义，不反向变成所有 Metric 的统一要求。
+
+以下三个概念保持分离：
+
+```text
+coverage
+→ Complex Metric Definition 中按需声明的 coverage requirement
+
+coverage_ratio
+→ 某次 Metric Result 在适用时提供的覆盖度结果
+
+source_coverage
+→ Persisted Derived Result 的来源覆盖追溯信息
+```
+
+本文件不提前为 `source_coverage` 发明新的通用 JSON Schema。
+
+---
+
+# 7. 通用计算不变量
+
+## 7.1 Ratio 不平均 Ratio
+
+跨 SKU、店铺、日期聚合比例时：
+
+```text
+SUM(numerator)
+/
+SUM(denominator)
+```
 
 禁止：
 
 ```text
-AVG(SKU Return Rate)
+AVG(ratio)
 ```
 
-代替：
-
-```text
-SUM(Returned Units)
-/
-SUM(Eligible Delivered Units)
-```
-
-除非产品明确展示的是“SKU 指标的简单平均值”。
+除非产品明确要求展示“多个独立 Ratio 的简单平均”。
 
 ---
 
-## 2.4 Money 不跨币种直接相加
+## 7.2 Money 不跨币种直接相加
 
 允许：
 
@@ -125,491 +502,24 @@ SUM(Eligible Delivered Units)
 100 USD + 500 CNY
 ```
 
-跨币种聚合必须：
+跨币种分析必须：
 
-1. 保留原始 Money；
-2. 使用已定义 Exchange Rate；
-3. 记录 Rate Basis；
-4. 转换到明确的 Reporting Currency；
-5. 保存计算版本。
-
----
-
-## 2.5 缺失不等于 0
-
-统一状态：
-
-```text
-VALID
-PARTIAL
-UNAVAILABLE
-NOT_APPLICABLE
-UNVERIFIED
-STALE
-ESTIMATED
-NO_DENOMINATOR
-NO_RECENT_DEMAND
-OPEN_COHORT
-```
-
-例如：
-
-Review API 无权限：
-
-```text
-review_count = UNAVAILABLE
-```
-
-不能：
-
-```text
-review_count = 0
-```
+1. 保留原始 Money 与 Currency；
+2. 使用已定义 FX；
+3. 保存 Rate Basis；
+4. 转换到明确 Reporting Currency；
+5. 不覆盖 Source Money。
 
 ---
 
-## 2.6 Denominator 为 0 时不返回 0%
+## 7.3 Percentile 从原始样本重算
 
-统一函数：
-
-```text
-safe_div(numerator, denominator)
-```
-
-规则：
+P50 / P90：
 
 ```text
-denominator > 0
-→ numerator / denominator
-
-denominator = 0
-→ value = NULL
-→ status = NO_DENOMINATOR
+P50 = percentile(samples, 0.50)
+P90 = percentile(samples, 0.90)
 ```
-
----
-
-## 2.7 历史指标必须可重算
-
-所有 O3Pilot 派生指标必须保存：
-
-```text
-metric_code
-metric_version
-calculation_run_id
-calculated_at
-source_coverage
-```
-
-影响指标的以下规则必须版本化：
-
-- Fulfillment Mapping；
-- Product Mapping；
-- Return Status Mapping；
-- Finance Type Classification；
-- Finance Allocation；
-- FX Policy；
-- Cost Fallback；
-- Forecast Model；
-- Metric Formula。
-
----
-
-# 3. 指标来源分类
-
-所有指标必须属于以下一种 `metric_origin`。
-
-## 3.1 `OZON_SOURCE`
-
-Ozon API 直接返回的指标。
-
-例如：
-
-```text
-analytics.ordered_units
-analytics.revenue
-content_rating
-search.position
-search.view_conversion
-rating.current_value
-performance.ctr_raw
-```
-
-规则：
-
-- 原值保存；
-- 不改变语义；
-- Ozon 改规则后允许历史值变化。
-
----
-
-## 3.2 `OZON_REFERENCE`
-
-Ozon 官方知识库明确公布的公式或 Seller Center 指标，但当前不一定有稳定 API 直接返回。
-
-例如：
-
-- 最近 50 个订单认购水平；
-- FBP 商品可用性；
-- FBP 错失销售；
-- Seller Center 取消率报告；
-- Seller Center 逾期交货率。
-
-O3Pilot 可以实现参考计算，但必须标记：
-
-```text
-metric_origin = OZON_REFERENCE
-```
-
-且不能宣称一定与 Seller Center 100% 相同，除非完成逐项对账。
-
----
-
-## 3.3 `O3P_DERIVED`
-
-完全由 O3Pilot 根据标准化 Fact 计算。
-
-例如：
-
-- Product Return Rate；
-- Order-to-Delivery P50；
-- Current Days of Cover；
-- Profit Margin；
-- Cost Coverage。
-
----
-
-## 3.4 `O3P_ESTIMATE`
-
-依赖假设、缺失数据补全或近似模型。
-
-例如：
-
-- Lost Sales Estimate；
-- 使用参考成本替代订单实际采购成本的 Profit；
-- 未取得真实 Seller Logistics Charge 时的物流成本估算；
-- 基于近期销量的简单补货量。
-
-必须明确显示 `ESTIMATED`。
-
----
-
-## 3.5 `O3P_FORECAST`
-
-预测模型输出。
-
-例如：
-
-- Forecast Demand；
-- Future Stockout Date；
-- Forecasted Days of Cover。
-
-预测值不得与 Actual Fact 混在同一字段。
-
----
-
-# 4. Metric Contract
-
-每个正式指标至少需要定义以下属性：
-
-```text
-metric_code
-display_name
-metric_origin
-domain
-
-grain
-dimensions
-
-time_basis
-window
-
-numerator
-denominator
-
-unit
-currency_policy
-
-eligibility
-exclusions
-
-aggregation_rule
-
-metric_version
-status
-```
-
-示例：
-
-```text
-metric_code = o3p.product.return_rate
-grain = PRODUCT + PERIOD
-time_basis = DELIVERY_COHORT
-numerator = completed_returned_units_as_of
-denominator = delivered_units_in_cohort
-unit = RATIO
-```
-
----
-
-# 5. 通用粒度
-
-正式粒度允许包括：
-
-```text
-SHOP
-SELLER_CATALOG_ITEM
-PRODUCT
-SKU
-MOTHER_ORDER
-POSTING
-POSTING_ITEM
-WAREHOUSE
-LOGISTICS_PROVIDER
-DELIVERY_METHOD
-RETURN_CASE
-CAMPAIGN
-CAMPAIGN_SKU
-QUESTION
-FINANCE_TYPE
-DATE
-PERIOD
-```
-
-复杂粒度组合示例：
-
-```text
-SHOP + SKU + DAY
-CAMPAIGN + DAY
-CAMPAIGN + SKU + DAY
-PRODUCT + DELIVERY_COHORT
-SHOP + FINANCE_TYPE + MONTH
-```
-
----
-
-# 6. 时间规则
-
-## 6.1 时间必须指定 Basis
-
-不得只写：
-
-```text
-2026-08-01 Sales
-```
-
-而不说明是哪种时间。
-
-正式 `time_basis` 至少包括：
-
-```text
-ORDER_CREATED
-POSTING_CREATED
-PROCESSING_STARTED
-HANDOVER
-DELIVERED
-CANCELLED
-RETURN_CREATED
-RETURN_COMPLETED
-ACCRUAL_DATE
-BUSINESS_DATE
-SNAPSHOT_TIME
-CAMPAIGN_DATE
-IMPORT_DATE
-DELIVERY_COHORT
-ORDER_COHORT
-SHIPPED_COHORT
-BUYOUT_ELIGIBLE_COHORT
-ACCRUAL_PERIOD
-```
-
----
-
-## 6.2 默认业务展示时区
-
-O3Pilot 默认前端展示：
-
-```text
-Asia/Shanghai
-UTC+8
-```
-
-但指标必须保留来源业务日语义。
-
-不能把：
-
-- Ozon Analytics Day；
-- Ozon Finance Date；
-- Ozon Exchange Rate Interval；
-- Performance Date；
-
-强行统一成北京时间日期后再计算。
-
----
-
-## 6.3 Period Comparison
-
-同比 / 环比 / 前期比较必须使用等长可比窗口。
-
-例如：
-
-```text
-current = 2026-08-01 ~ 2026-08-07
-previous = 2026-07-25 ~ 2026-07-31
-```
-
-变化率：
-
-```text
-(current - previous) / abs(previous)
-```
-
-如果：
-
-```text
-previous = 0
-```
-
-返回：
-
-```text
-NO_DENOMINATOR
-```
-
-不能返回无穷大。
-
----
-
-# 7. Money 与 Reporting Currency
-
-## 7.1 原始 Money 指标
-
-原始金额指标必须保留：
-
-```text
-amount
-currency
-```
-
----
-
-## 7.2 Reporting Currency
-
-跨币种分析必须显式选择：
-
-```text
-reporting_currency
-```
-
-可以是：
-
-- Shop settlement currency；
-- USD；
-- CNY；
-- RUB；
-- 用户指定币种。
-
-不得假设所有店铺默认使用同一个币种。
-
----
-
-## 7.3 FX Metric Rule
-
-每次转换必须能够追溯：
-
-```text
-exchange_rate
-exchange_rate_type
-rate_basis_type
-rate_basis_time
-rate_policy_version
-```
-
-Ozon Business FX 与 Seller Cost FX 分开。
-
----
-
-## 7.4 金额口径词典
-
-以下金额不是同义词：
-
-| 指标 | 含义 |
-|---|---|
-| `order_gross_value` | Order / Posting Item 侧卖家商品价格 × 数量 |
-| `buyer_paid_value` | 订单侧 Buyer / Customer 实际支付观察值 |
-| `ozon.analytics.revenue` | Ozon Analytics 返回的 Revenue |
-| `finance_gross_sales` | Finance Type 69 seller_price × quantity 重建的 Finance Gross Sales |
-| `finance_net_accrual` | Finance Accrual 全部 Signed Amount 的净和 |
-| `performance_orders_money` | Performance 广告归因订单金额 |
-| `payout_amount` | Ozon 财务报告中的实际 / 计划付款事实 |
-
-页面不得把这些全部显示成同一个：
-
-```text
-销售额
-```
-
-而不标明 Metric Contract。
-
----
-
-## 7.5 无 Reporting Currency 时的多币种结果
-
-如果一个查询范围包含多个 Currency，且用户没有选择 Reporting Currency：
-
-正确结果是：
-
-```text
-USD 100
-CNY 500
-```
-
-或按 Currency 分组展示。
-
-禁止自动求和成：
-
-```text
-600
-```
-
----
-
-# 8. Ratio、Percentile 与平均值
-
-## 8.1 Ratio
-
-内部统一保存：
-
-```text
-0.0 ~ 1.0
-```
-
-展示时转换成百分比。
-
-Ozon 原始指标如果本身返回 0–100，则 Raw 保持原值，并在标准化层声明 Scale。
-
----
-
-## 8.2 Average
-
-平均值只用于适合均值解释的指标。
-
-时效类指标默认同时提供：
-
-```text
-P50
-P90
-Average
-Sample Count
-```
-
-P50 为主观察值。
-
----
-
-## 8.3 Percentile
-
-P50 / P90 必须从原始样本重新计算。
 
 禁止：
 
@@ -621,1142 +531,411 @@ AVG(daily_p50)
 
 ---
 
-# 9. 指标可用性
+## 7.4 Period & Baseline Comparison
 
-每个 Metric Result 建议同时拥有：
+基础变化：
 
 ```text
-value
-status
-sample_count
-eligible_count
-coverage_ratio
-as_of_time
+delta = current - baseline
 ```
 
-如果源数据不完整：
+变化率：
 
 ```text
-status = PARTIAL
-```
-
-而不是静默返回“完整”的数字。
-
----
-
-## 9.1 默认订单资格规则：仅排除发货前取消
-
-O3Pilot 对订单类自算指标采用统一的第一层资格过滤：
-
-```text
-eligible_business_posting
-=
-已经创建
-AND NOT confirmed_pre_shipment_cancelled
-```
-
-也就是说，**只有已经确认在实际发货 / 转交物流之前就取消的订单，才从默认经营统计中排除。**
-
-以下订单都继续属于 `eligible_business_posting`：
-
-```text
-待备货且未取消
-待发货且未取消
-已发货
-运输中
-已签收
-发货后取消
-其他没有被确认属于发货前取消的有效订单
-```
-
-因此：
-
-```text
-未发货
-!=
-无效订单
-```
-
-不能因为：
-
-```text
-shipped_at IS NULL
-```
-
-就把订单从销售、订单金额、AOV、ADS 或 Forecast Actual 中删除。
-
-### 发货前取消
-
-统一定义：
-
-```text
-confirmed_pre_shipment_cancelled
-=
-Posting 已最终取消
-AND
-能够可靠确认取消发生在实际发货 / 转交物流节点之前
-```
-
-此类订单：
-
-```text
-不进入 eligible_business_posting
-```
-
-默认从以下 O3Pilot 经营指标排除：
-
-- Sales Posting Count；
-- Sales Units；
-- Order Gross Value；
-- Buyer Paid Value；
-- AOV；
-- Average Unit Price；
-- SKU Sales Performance；
-- Inventory ADS；
-- Replenishment Demand；
-- Default Cancellation Rate；
-- Order / SKU Contribution Profit；
-- Forecast Actual Demand；
-- Cross-shop Sales Aggregation。
-
-### 待发货但未取消
-
-如果订单尚未发货，但截至 `as_of_time` 仍然有效、没有取消：
-
-```text
-pending_unshipped_active = true
-```
-
-则：
-
-```text
-posting IN eligible_business_posting
-```
-
-它应继续进入不要求后续生命周期节点的经营统计。
-
-如果该订单未来最终在发货前取消，历史 Cohort 在重新计算时应将其排除。
-
-因此近期订单 Cohort 可以处于：
-
-```text
-OPEN_COHORT
-```
-
-并允许指标随订单最终结果修订。
-
-### 第二层：Metric-specific Eligibility
-
-通过第一层资格过滤后，每个指标仍必须应用自身的生命周期要求。
-
-例如：
-
-```text
-Sales Posting Count
-→ eligible_business_posting
-→ 待发货未取消订单包含
-
-Delivery Duration
-→ eligible_business_posting
-→ 还必须存在 delivery / handover 所需时间节点
-
-Product Return Rate
-→ eligible_business_posting
-→ 还必须进入对应 Delivered Cohort
-
-Buyout Rate
-→ eligible_business_posting
-→ 还必须达到 Buyout Eligibility Stage
-```
-
-所以：
-
-**“待发货未取消订单没有进入某个指标”必须是因为该指标自身需要更晚的生命周期节点，而不能只是因为它尚未发货。**
-
-### 无法确认取消发生在发货前还是发货后
-
-如果订单已经取消，但无法可靠确认取消发生在发货前还是发货后：
-
-```text
-cancellation_stage = UNVERIFIED
-```
-
-由于尚未确认它属于发货前取消，不能直接按发货前取消将其从所有经营指标删除。
-
-相关 Cancellation / Fulfillment 指标应：
-
-```text
-status = PARTIAL
-```
-
-并展示 Cancellation Stage Coverage。
-
-### 明确例外
-
-以下事实不得因为本规则被删除或改写：
-
-1. **Created Demand**
-
-用于分析完整下单需求，包含发货前取消。
-
-2. **OZON_SOURCE / OZON_REFERENCE**
-
-保持 Ozon 自己的原始 / 官方口径。
-
-3. **Finance / Settlement / Payout**
-
-发货前取消可能已经产生真实费用，这些 Money Fact 必须保留。
-
-4. **非订单 Cohort 指标**
-
-例如 Product、Price、Inventory Snapshot、Rating、Data Quality。
-
----
-
-# 10. 订单与销售基础指标
-
-本章节的 `o3p.sales.*` 默认先使用：
-
-```text
-eligible_business_posting
-```
-
-即：
-
-```text
-所有已创建订单
-- 已确认发货前取消订单
-```
-
-待发货但尚未取消的订单继续保留。
-
-如果需要观察完整原始下单需求，包括发货前取消，则使用独立的 `o3p.demand.*` 指标。
-
----
-
-# 10.1 有效母订单数
-
-```text
-metric_code:
-o3p.sales.mother_order_count
-```
-
-定义：
-
-```text
-COUNT(DISTINCT mother_order_id)
-FROM eligible_business_posting
-```
-
-只要一个母订单至少存在一个未被确认属于发货前取消的 Posting，即进入有效母订单统计。
-
-Time Basis：
-
-```text
-ORDER_CREATED
-```
-
-近期未完结订单允许属于 `OPEN_COHORT`。
-
----
-
-# 10.2 有效订单数 / Posting Count
-
-```text
-metric_code:
-o3p.sales.posting_count
-```
-
-公式：
-
-```text
-COUNT(DISTINCT posting_id)
-FROM eligible_business_posting
-```
-
-O3Pilot 中文“订单号”对应 `posting_number`。
-
-不得与母订单数混用。
-
-包含：
-
-- 待备货未取消；
-- 待发货未取消；
-- 已发货；
-- 已签收；
-- 发货后取消。
-
-排除：
-
-- 已确认发货前取消。
-
----
-
-# 10.3 有效销售商品件数 / Ordered Units
-
-```text
-metric_code:
-o3p.sales.ordered_units
-```
-
-公式：
-
-```text
-SUM(posting_item.quantity)
-WHERE posting IN eligible_business_posting
-```
-
-粒度：
-
-```text
-Posting Item
-```
-
-Time Basis：
-
-```text
-POSTING_CREATED
-```
-
-该指标包括待发货但未取消订单的商品件数。
-
-它与：
-
-```text
-ozon.analytics.ordered_units
-```
-
-属于不同指标。
-
----
-
-# 10.4 实际已发货商品件数
-
-```text
-metric_code:
-o3p.fulfillment.shipped_units
-```
-
-公式：
-
-```text
-SUM(posting_item.quantity)
-WHERE posting IN eligible_business_posting
-  AND reliable shipped_at exists
-```
-
-这是履约阶段指标。
-
-待发货未取消订单不进入该指标，是因为它尚未达到发货节点，而不是因为它被视为无效订单。
-
----
-
-# 10.5 已签收商品件数
-
-```text
-metric_code:
-o3p.sales.delivered_units
-```
-
-公式：
-
-```text
-SUM(posting_item.quantity)
-WHERE posting IN eligible_business_posting
-  AND posting normalized final state = DELIVERED
-```
-
-Time Basis：
-
-```text
-DELIVERED
-```
-
-状态映射必须版本化。
-
-待发货未取消订单不进入该指标，是因为尚未签收。
-
----
-
-# 10.6 发货后取消商品件数
-
-```text
-metric_code:
-o3p.sales.post_shipment_cancelled_units
-```
-
-公式：
-
-```text
-SUM(posting_item.quantity)
-WHERE posting IN eligible_business_posting
-  AND reliable shipped_at exists
-  AND final state = CANCELLED
-  AND cancellation occurred after shipment
-```
-
-发货前取消件数不计入本指标。
-
----
-
-# 10.7 Order Gross Value
-
-```text
-metric_code:
-o3p.sales.order_gross_value
-```
-
-公式：
-
-```text
-SUM(unit_price_amount * quantity)
-WHERE posting IN eligible_business_posting
-```
-
-使用 Posting Item 原始 seller/order price。
-
-该指标是**排除发货前取消后的有效订单金额**，不是 Finance Revenue。
-
-包含尚未发货但仍有效的订单金额。
-
-必须按币种分组或转换。
-
----
-
-# 10.8 Buyer Paid Value
-
-```text
-metric_code:
-o3p.sales.buyer_paid_value
-```
-
-来源：
-
-```text
-posting_item_pricing_observation.customer_price
-```
-
-Eligibility：
-
-```text
-posting IN eligible_business_posting
-```
-
-规则：
-
-仅当对应订单价格结构存在明确 Currency 时计算。
-
-该指标用于：
-
-- 买家支付观察；
-- 促销分析；
-- Order vs Finance 对账。
-
-不作为 Profit 主收入字段。
-
----
-
-# 10.9 平均客单价
-
-必须提供两个明确版本。
-
-## Mother Order AOV
-
-```text
-o3p.sales.aov_mother_order
-=
-order_gross_value
+delta_rate =
+(current - baseline)
 /
-mother_order_count
+abs(baseline)
 ```
 
-## Posting AOV
+如果：
 
 ```text
-o3p.sales.aov_posting
-=
-order_gross_value
-/
-posting_count
+baseline = 0
 ```
 
-分子和分母均使用同一个：
+返回：
 
 ```text
-eligible_business_posting
+NULL + NO_DENOMINATOR
 ```
 
-待发货未取消订单继续保留。
-
-禁止仅显示“客单价”而不说明哪一种。
-
----
-
-# 10.10 平均商品售价
-
-```text
-o3p.sales.average_unit_price
-=
-order_gross_value
-/
-ordered_units
-```
-
-必须在同一币种下计算。
-
----
-
-# 10.11 下单需求指标
-
-为了保留买家原始下单需求，单独定义：
-
-```text
-o3p.demand.created_mother_order_count
-=
-COUNT(DISTINCT mother_order_id)
-by ORDER_CREATED
-```
-
-```text
-o3p.demand.created_posting_count
-=
-COUNT(DISTINCT posting_id)
-by POSTING_CREATED
-```
-
-```text
-o3p.demand.created_ordered_units
-=
-SUM(posting_item.quantity)
-by POSTING_CREATED
-```
-
-```text
-o3p.demand.created_order_gross_value
-=
-SUM(unit_price_amount * quantity)
-by POSTING_CREATED
-```
-
-这些指标包含发货前取消订单。
-
-因此：
-
-```text
-Created Demand
-- Pre-shipment Cancellation
-= Eligible Sales Order Set
-```
-
-在订单仍待发货且未取消时，它同时存在于：
-
-```text
-Created Demand
-Eligible Sales Order Set
-```
-
-如果未来在发货前取消，则从后者移除。
-
----
-
-# 10.12 Ozon Analytics 销售指标
-
-以下属于 `OZON_SOURCE`：
-
-```text
-ozon.analytics.revenue
-ozon.analytics.ordered_units
-ozon.analytics.returns
-ozon.analytics.cancellations
-ozon.analytics.delivered_units
-```
-
-这些值不得自动应用 O3Pilot 的发货前取消过滤，也不得覆盖 O3Pilot Order Fact 指标。
-
-主要用途：
-
-- Ozon 经营趋势；
-- Ozon 口径观察；
-- 与 O3Pilot Order Fact 对账；
-- Forecast Feature。
-
----
-
-# 11. 销售趋势
-
-## 11.1 Sales Growth
+旧的通用：
 
 ```text
 o3p.sales.growth_rate
-=
-(current_sales - previous_sales)
-/
-abs(previous_sales)
-```
-
-`current_sales` 必须指定使用哪一个金额指标。
-
-推荐：
-
-- Finance Analysis：`finance_gross_sales`；
-- Traffic Analytics：`ozon.analytics.revenue`；
-- Order Analysis：`order_gross_value`，默认排除已确认发货前取消；
-- Demand Analysis：`o3p.demand.created_order_gross_value`，包含发货前取消。
-
-禁止在同一趋势图中途切换 Source Metric。
-
----
-
-## 11.2 Unit Growth
-
-```text
 o3p.sales.unit_growth_rate
+```
+
+不再作为可切换底层 Source 的独立正式 Metric Code；具体趋势使用被比较的 Canonical Metric + 本节 Comparison Rule，避免一个 Code 对应多个含义。
+
+“变化”本身不等于“异常”。Threshold、Seasonality、Anomaly Model 属于应用策略 Authority。
+
+---
+
+# 8. Order Eligibility 与 Cohort
+
+## 8.1 默认经营订单资格
+
+O3Pilot 默认经营订单集合：
+
+```text
+eligible_business_posting
 =
-(current_ordered_units - previous_ordered_units)
-/
-previous_ordered_units
+created posting
+AND NOT confirmed_pre_shipment_cancelled
 ```
 
-如果 previous = 0：
-
-```text
-NO_DENOMINATOR
-```
-
----
-
-# 12. 流量与经营 Analytics
-
-以下指标直接来自 `/v1/analytics/data`，属于 `OZON_SOURCE`：
-
-```text
-ozon.analytics.hits_view_search
-ozon.analytics.hits_view_pdp
-ozon.analytics.hits_view
-ozon.analytics.hits_tocart_search
-ozon.analytics.hits_tocart_pdp
-ozon.analytics.hits_tocart
-ozon.analytics.session_view_search
-ozon.analytics.session_view_pdp
-ozon.analytics.session_view
-```
-
-解析必须使用 DATA_SOURCES 中的 Metric Allowlist 与响应顺序校验。
-
----
-
-# 13. 浏览 → 加购
-
-```text
-metric_code:
-o3p.funnel.view_to_cart_rate
-```
-
-公式：
-
-```text
-hits_tocart
-/
-hits_view
-```
-
-要求：
-
-- 分子和分母来自同一 `SKU + Day`；
-- 相同 Analytics Contract；
-- 同一时间窗口。
-
-如果 Ozon 某日缺失对应 Metric：
-
-```text
-PARTIAL
-```
-
----
-
-# 14. 搜索表现指标
-
-来自 Product Queries 的以下指标属于 `OZON_SOURCE`：
-
-```text
-ozon.search.unique_search_users
-ozon.search.unique_view_users
-ozon.search.position
-ozon.search.view_conversion
-ozon.search.gmv
-ozon.search.query_order_count
-```
-
-`view_conversion` 直接保存 Ozon 原值。
-
-O3Pilot v1.0 不重新定义一个同名 `view_conversion`。
-
----
-
-# 15. 搜索词贡献
-
-## 15.1 Query GMV Share
-
-```text
-o3p.search.query_gmv_share
-=
-query_gmv
-/
-sum(all_query_gmv_for_same_sku_period)
-```
-
-要求所有 GMV Currency 相同。
-
----
-
-## 15.2 Query Order Share
-
-```text
-o3p.search.query_order_share
-=
-query_order_count
-/
-sum(all_query_order_count_for_same_sku_period)
-```
-
----
-
-# 16. 商品内容指标
-
-# 16.1 Ozon Content Rating
-
-```text
-metric_code:
-ozon.product.content_rating
-```
-
-来源：
-
-```text
-/v1/product/rating-by-sku
-```
-
-属于 `OZON_SOURCE`。
-
-包括：
-
-```text
-total_rating
-group_rating
-group_weight
-condition_fulfilled
-improve_attributes
-```
-
-O3Pilot 不自行改变 Ozon Score 权重。
-
----
-
-# 16.2 待完善属性数
-
-```text
-o3p.product.missing_recommended_attribute_count
-=
-COUNT(DISTINCT improve_attribute_id)
-```
-
-来源：
-
-Ozon Content Rating 的 `improve_attributes`。
-
-它表示 Ozon 当前评分系统建议完善的属性数量。
-
-不是“类目全部缺失属性数”。
-
----
-
-# 16.3 内容质量趋势
-
-```text
-o3p.product.content_rating_change
-=
-latest_content_rating - previous_content_rating
-```
-
-必须基于 Snapshot。
-
----
-
-# 17. 价格与价格竞争力
-
-# 17.1 当前 Seller Price
-
-```text
-ozon.price.seller_price
-```
-
-来源：
-
-Product Price Snapshot。
-
----
-
-# 17.2 Marketing Seller Price
-
-```text
-ozon.price.marketing_seller_price
-```
-
-属于 Source Fact。
-
----
-
-# 17.3 Discount Rate
-
-仅在 `old_price > 0` 时：
-
-```text
-o3p.price.discount_rate
-=
-(old_price - seller_price)
-/
-old_price
-```
-
-如果：
-
-```text
-old_price <= 0
-```
-
-返回：
-
-```text
-NOT_APPLICABLE
-```
-
----
-
-# 17.4 Ozon Price Index
-
-以下保留为 Source Metric：
-
-```text
-ozon.price.color_index
-ozon.price.external_index_value
-ozon.price.ozon_index_value
-ozon.price.self_marketplaces_index_value
-```
-
-不同比较价格可能拥有独立 Currency。
-
-不得直接用不同币种金额做 Gap。
-
----
-
-# 17.5 Competitive Price Gap
-
-如果卖家价格与比较价格已经转换到同一 Reporting Currency：
-
-```text
-o3p.price.competitive_gap
-=
-seller_price_reporting
-/
-reference_price_reporting
-- 1
-```
-
-解释：
-
-```text
-< 0
-→ Seller Price 低于参考价
-
-> 0
-→ Seller Price 高于参考价
-```
-
-必须保存 FX Policy。
-
----
-
-# 18. 促销效果
-
-促销前后效果属于 O3Pilot Derived。
-
-基础计算：
-
-```text
-lift
-=
-metric_during_promotion
-/
-metric_baseline
-- 1
-```
-
-Baseline 必须使用 `baseline_policy_version`。
-
-v1.0 推荐：
-
-```text
-同等长度、紧邻促销前、排除已知促销日的窗口
-```
-
-但如果季节性明显：
-
-必须标记：
-
-```text
-ESTIMATED
-```
-
-不得把简单 Before / After 直接解释成因果效果。
-
----
-
-# 19. 库存基础指标
-
-# 19.1 Sellable Stock
-
-```text
-metric_code:
-o3p.inventory.sellable_stock
-```
-
-当前 `/v4/product/info/stocks` 的 `present` 在已验证业务解释中作为在库可售数量。
+以下 Posting 仍属于有效经营集合：
+
+- 待备货且未取消；
+- 待发货且未取消；
+- 已发货；
+- 运输中；
+- 已签收；
+- 发货后取消；
+- 其他未确认属于发货前取消的有效订单。
 
 因此：
 
 ```text
-sellable_stock
+shipped_at IS NULL
+!=
+invalid order
+```
+
+不能因为尚未发货就从 Sales、AOV、ADS 或默认经营指标删除。
+
+---
+
+## 8.2 Created Demand 独立
+
+原始下单需求必须单独统计：
+
+```text
+Created Demand
+```
+
+它包含后来发生发货前取消的订单。
+
+因此：
+
+```text
+Created Demand
+- confirmed pre-shipment cancellation
 =
-SUM(present)
-```
-
-按选择的：
-
-```text
-shop
-sku
-stock_type
-warehouse
-```
-
-聚合。
-
-不得自动计算：
-
-```text
-present - reserved
-```
-
-作为可售库存。
-
----
-
-# 19.2 Reserved Stock
-
-```text
-o3p.inventory.reserved_stock
-=
-SUM(reserved)
-```
-
-Reserved 独立展示。
-
----
-
-# 19.3 In-transit Stock
-
-```text
-o3p.inventory.in_transit_stock
-=
-SUM(eligible inbound_supply_item quantity)
-```
-
-Eligible 状态由 `inbound_mapping_version` 定义。
-
-当前库存与在途库存必须分开。
-
----
-
-# 20. 日均销量
-
-O3Pilot 同时定义两种 ADS。
-
-ADS 的订单侧销量默认基于 `eligible_business_posting`：排除已确认发货前取消，但保留待发货且未取消订单。近期窗口因此可能属于 `OPEN_COHORT`。
-
-# 20.1 Calendar ADS
-
-```text
-o3p.inventory.calendar_ads_units
-=
-eligible_ordered_units_in_window
-/
-calendar_days_in_window
-```
-
-适合：
-
-- 稳定供货商品；
-- 简单趋势；
-- 透明展示。
-
----
-
-# 20.2 Availability-adjusted ADS
-
-```text
-o3p.inventory.adjusted_ads_units
-=
-eligible_ordered_units_on_available_days
-/
-available_days
-```
-
-用于降低缺货造成的销量低估。
-
-如果：
-
-```text
-available_days = 0
-```
-
-返回：
-
-```text
-NO_DENOMINATOR
-```
-
-默认分析窗口不在本文件硬编码。
-
-允许：
-
-```text
-7
-14
-28
-56
-```
-
-等版本化窗口。
-
----
-
-# 21. Ozon 商品可用性 Reference
-
-Ozon 当前 Seller Center FBP 商品可售性规则属于 `OZON_REFERENCE`。
-
-单商品：
-
-```text
-ozon.reference.product_availability
-=
-商品在 FBP 或 rFBS 至少一种模式可销售的时间
-/
-总观察时间
-```
-
-官方资料当前主要以过去 28 天说明。
-
-O3Pilot 不把该公式等同于自己的库存 Snapshot 可用率，除非完成对账。
-
----
-
-# 22. O3Pilot Availability
-
-```text
-metric_code:
-o3p.inventory.availability_rate
-```
-
-公式：
-
-```text
-available_eligible_days
-/
-eligible_observed_days
-```
-
-`available_eligible_day`：
-
-```text
-该日所选业务模式中至少一个模式 sellable_stock > 0
-```
-
-要求：
-
-- 当天库存数据覆盖可靠；
-- 没有 Sync Gap；
-- 日状态生成规则版本化。
-
-缺失库存数据的日期：
-
-不得直接按“缺货日”处理。
-
----
-
-# 23. 缺货天数
-
-```text
-o3p.inventory.out_of_stock_days
-=
-eligible_observed_days
--
-available_eligible_days
+Eligible Sales Order Set
 ```
 
 ---
 
-# 24. 库存覆盖天数
+## 8.3 Source / Reference 不继承 O3Pilot Eligibility
 
-# 24.1 Current Days of Cover
-
-```text
-metric_code:
-o3p.inventory.days_of_cover
-```
-
-推荐：
-
-```text
-sellable_stock
-/
-adjusted_ads_units
-```
-
-如果：
-
-```text
-adjusted_ads_units = 0
-```
-
-返回：
-
-```text
-NO_RECENT_DEMAND
-```
-
-不能返回一个伪造的“999 天”。
+`OZON_SOURCE` 和 `OZON_REFERENCE` 保持官方原口径，不自动套用 `eligible_business_posting`。
 
 ---
 
-# 24.2 Supply Days of Cover
+## 8.4 Open Cohort
 
-包含在途库存：
+近期订单、退货、认购等结果可能继续变化。
+
+可以：
 
 ```text
-o3p.inventory.supply_days_of_cover
-=
-(sellable_stock + eligible_in_transit_stock)
-/
-adjusted_ads_units
+status = OPEN_COHORT
 ```
 
-该指标不等于当前库存覆盖天数。
+不得因为实现方便而为所有类目硬编码一个统一“成熟天数”。
 
 ---
 
-# 25. Ozon Lost Sales Reference
+# 9. Active Metric Registry
 
-Ozon 当前 FBP Seller Center Reference：
+当前 v1 Active Metric 只允许 P0 / P1。
+
+
+| metric_code | display_name | metric_origin | contract_shape | domain | feature_phase |
+|---|---|---|---|---|---|
+| `o3p.data.coverage_lag` | Data Coverage Lag | O3P_DERIVED | DERIVED | Data Quality | P0 |
+| `o3p.data.mapping_coverage` | Mapping Coverage | O3P_DERIVED | DERIVED | Data Quality | P0 |
+| `o3p.product.buyout_rate` | O3Pilot Product Buyout Rate | O3P_DERIVED | DERIVED | Buyout | P1 |
+| `o3p.product.non_buyout_rate` | Product Non-buyout Rate | O3P_DERIVED | DERIVED | Buyout | P1 |
+| `ozon.reference.buyout_rate_last_50_orders` | Ozon Buyout Rate — Last up to 50 Orders Reference | OZON_REFERENCE | DERIVED | Buyout | P1 |
+| `o3p.cancellation.buyer_rate` | Buyer-responsible Post-shipment Cancellation Rate | O3P_DERIVED | DERIVED | Cancellation | P1 |
+| `o3p.cancellation.posting_rate` | Post-shipment Posting Cancellation Rate | O3P_DERIVED | DERIVED | Cancellation | P1 |
+| `o3p.cancellation.pre_shipment_rate` | Pre-shipment Cancellation Rate | O3P_DERIVED | DERIVED | Cancellation | P1 |
+| `o3p.cancellation.seller_responsible_rate` | Seller-responsible Post-shipment Cancellation Rate | O3P_DERIVED | DERIVED | Cancellation | P1 |
+| `o3p.cancellation.stage_coverage` | Cancellation Stage Coverage | O3P_DERIVED | DERIVED | Cancellation | P1 |
+| `o3p.cancellation.unit_rate` | Post-shipment Cancelled Unit Rate | O3P_DERIVED | DERIVED | Cancellation | P1 |
+| `ozon.reference.cancellation_rate_7d_count` | Ozon Cancellation Rate 7D by Shipment Count | OZON_REFERENCE | DERIVED | Cancellation | P1 |
+| `ozon.reference.cancellation_rate_7d_value` | Ozon Cancellation Rate 7D by Shipment Value | OZON_REFERENCE | DERIVED | Cancellation | P1 |
+| `o3p.demand.created_mother_order_count` | Created Mother Order Count | O3P_DERIVED | DERIVED | Demand | P1 |
+| `o3p.demand.created_order_gross_value` | Created Order Gross Value | O3P_DERIVED | DERIVED | Demand | P1 |
+| `o3p.demand.created_ordered_units` | Created Ordered Units | O3P_DERIVED | DERIVED | Demand | P1 |
+| `o3p.demand.created_posting_count` | Created Posting Count | O3P_DERIVED | DERIVED | Demand | P1 |
+| `o3p.fulfillment.deadline_shift_hours` | Shipment Deadline Shift Hours | O3P_DERIVED | DERIVED | Fulfillment | P1 |
+| `o3p.fulfillment.delivery_transit_duration` | Handover-to-Delivery Duration | O3P_DERIVED | DERIVED | Fulfillment | P1 |
+| `o3p.fulfillment.on_time_handover_rate` | On-time Handover Rate | O3P_DERIVED | DERIVED | Fulfillment | P1 |
+| `o3p.fulfillment.order_to_delivery_duration` | Order-to-Delivery Duration | O3P_DERIVED | DERIVED | Fulfillment | P1 |
+| `o3p.fulfillment.order_to_handover_duration` | Order-to-Handover Duration | O3P_DERIVED | DERIVED | Fulfillment | P1 |
+| `o3p.fulfillment.processing_to_handover_duration` | Processing-to-Handover Duration | O3P_DERIVED | DERIVED | Fulfillment | P1 |
+| `o3p.fulfillment.promise_delivery_hit_rate` | Promise Delivery Hit Rate | O3P_DERIVED | DERIVED | Fulfillment | P1 |
+| `o3p.fulfillment.shipped_units` | Shipped Units | O3P_DERIVED | DERIVED | Fulfillment | P1 |
+| `o3p.quality.delivery_time_completeness` | Delivery Time Completeness | O3P_DERIVED | DERIVED | Fulfillment | P1 |
+| `o3p.quality.handover_time_completeness` | Handover Time Completeness | O3P_DERIVED | DERIVED | Fulfillment | P1 |
+| `ozon.reference.shipment_delay_rate_14d` | Ozon Shipment Delay Rate 14D Reference | OZON_REFERENCE | DERIVED | Fulfillment | P1 |
+| `o3p.inventory.adjusted_ads_units` | Availability-adjusted ADS Units | O3P_DERIVED | DERIVED | Inventory | P1 |
+| `o3p.inventory.availability_rate` | O3Pilot Availability Rate | O3P_DERIVED | DERIVED | Inventory | P1 |
+| `o3p.inventory.calendar_ads_units` | Calendar ADS Units | O3P_DERIVED | DERIVED | Inventory | P1 |
+| `o3p.inventory.days_of_cover` | Current Days of Cover | O3P_DERIVED | DERIVED | Inventory | P1 |
+| `o3p.inventory.in_transit_stock` | In-transit Stock | O3P_DERIVED | DERIVED | Inventory | P1 |
+| `o3p.inventory.lost_sales_estimate` | Lost Sales Estimate | O3P_ESTIMATE | DERIVED | Inventory | P1 |
+| `o3p.inventory.out_of_stock_days` | Out-of-stock Days | O3P_DERIVED | DERIVED | Inventory | P1 |
+| `o3p.inventory.reserved_stock` | Reserved Stock | O3P_DERIVED | DERIVED | Inventory | P1 |
+| `o3p.inventory.sellable_stock` | Sellable Stock | O3P_DERIVED | DERIVED | Inventory | P1 |
+| `o3p.inventory.supply_days_of_cover` | Supply Days of Cover | O3P_DERIVED | DERIVED | Inventory | P1 |
+| `ozon.reference.product_availability` | Ozon Product Availability Reference | OZON_REFERENCE | DERIVED | Inventory | P1 |
+| `o3p.price.competitive_gap` | Competitive Price Gap | O3P_DERIVED | DERIVED | Price | P1 |
+| `o3p.price.discount_rate` | Discount Rate | O3P_DERIVED | DERIVED | Price | P1 |
+| `ozon.price.color_index` | Ozon Price Color Index | OZON_SOURCE | SOURCE | Price | P1 |
+| `ozon.price.external_index_value` | Ozon External Price Index Value | OZON_SOURCE | SOURCE | Price | P1 |
+| `ozon.price.marketing_seller_price` | Ozon Marketing Seller Price | OZON_SOURCE | SOURCE | Price | P1 |
+| `ozon.price.ozon_index_value` | Ozon Ozon-Index Value | OZON_SOURCE | SOURCE | Price | P1 |
+| `ozon.price.self_marketplaces_index_value` | Ozon Self-Marketplaces Index Value | OZON_SOURCE | SOURCE | Price | P1 |
+| `ozon.price.seller_price` | Ozon Seller Price | OZON_SOURCE | SOURCE | Price | P1 |
+| `o3p.product.content_rating_change` | Content Rating Change | O3P_DERIVED | DERIVED | Product | P1 |
+| `o3p.product.missing_recommended_attribute_count` | Missing Recommended Attribute Count | O3P_DERIVED | DERIVED | Product | P1 |
+| `ozon.product.content_rating` | Ozon Product Content Rating | OZON_SOURCE | SOURCE | Product | P1 |
+| `o3p.product.return_rate` | Product Return Rate | O3P_DERIVED | DERIVED | Returns | P1 |
+| `o3p.return.reason_share` | Return Reason Share | O3P_DERIVED | DERIVED | Returns | P1 |
+| `o3p.return.request_rate` | Return Request Rate | O3P_DERIVED | DERIVED | Returns | P1 |
+| `o3p.whd.recovery_revenue` | WHD Recovery Revenue | O3P_DERIVED | DERIVED | Returns | P1 |
+| `o3p.whd.resale_rate` | WHD Resale Rate | O3P_DERIVED | DERIVED | Returns | P1 |
+| `o3p.sales.aov_mother_order` | Mother Order AOV | O3P_DERIVED | DERIVED | Sales | P1 |
+| `o3p.sales.aov_posting` | Posting AOV | O3P_DERIVED | DERIVED | Sales | P1 |
+| `o3p.sales.average_unit_price` | Average Unit Price | O3P_DERIVED | DERIVED | Sales | P1 |
+| `o3p.sales.buyer_paid_value` | Buyer Paid Value | OZON_SOURCE | SOURCE | Sales | P1 |
+| `o3p.sales.delivered_units` | Delivered Units | O3P_DERIVED | DERIVED | Sales | P1 |
+| `o3p.sales.mother_order_count` | Eligible Mother Order Count | O3P_DERIVED | DERIVED | Sales | P1 |
+| `o3p.sales.order_gross_value` | Eligible Order Gross Value | O3P_DERIVED | DERIVED | Sales | P1 |
+| `o3p.sales.ordered_units` | Eligible Ordered Units | O3P_DERIVED | DERIVED | Sales | P1 |
+| `o3p.sales.post_shipment_cancelled_units` | Post-shipment Cancelled Units | O3P_DERIVED | DERIVED | Sales | P1 |
+| `o3p.sales.posting_count` | Eligible Posting Count | O3P_DERIVED | DERIVED | Sales | P1 |
+| `ozon.analytics.cancellations` | Ozon Analytics Cancellations | OZON_SOURCE | SOURCE | Sales | P1 |
+| `ozon.analytics.delivered_units` | Ozon Analytics Delivered Units | OZON_SOURCE | SOURCE | Sales | P1 |
+| `ozon.analytics.ordered_units` | Ozon Analytics Ordered Units | OZON_SOURCE | SOURCE | Sales | P1 |
+| `ozon.analytics.returns` | Ozon Analytics Returns | OZON_SOURCE | SOURCE | Sales | P1 |
+| `ozon.analytics.revenue` | Ozon Analytics Revenue | OZON_SOURCE | SOURCE | Sales | P1 |
+| `ozon.rating.current_value` | Ozon Current Rating Value | OZON_SOURCE | SOURCE | Shop Health | P1 |
+| `ozon.rating.fbs_error_index` | Ozon FBS Error Index | OZON_SOURCE | SOURCE | Shop Health | P1 |
+| `ozon.rating.history_value` | Ozon Historical Rating Value | OZON_SOURCE | SOURCE | Shop Health | P1 |
+| `ozon.rating.status_danger` | Ozon Rating Danger Status | OZON_SOURCE | SOURCE | Shop Health | P1 |
+| `ozon.rating.status_premium` | Ozon Rating Premium Status | OZON_SOURCE | SOURCE | Shop Health | P1 |
+| `ozon.rating.status_warning` | Ozon Rating Warning Status | OZON_SOURCE | SOURCE | Shop Health | P1 |
+
+
+---
+
+# 10. Active Source Metric Contracts
+
+Source Metric 保留来源原义，不因为 O3Pilot 存在类似 Derived Metric 就覆盖或改写。
+
+
+
+## 10.1 Sales
+
+
+| metric_code | source | source_field | grain | time_basis | unit | currency_policy | aggregation_rule |
+|---|---|---|---|---|---|---|---|
+| `o3p.sales.buyer_paid_value` | `posting_item_pricing_observation` | `customer_price_amount` | SHOP + POSTING_ITEM + PERIOD | POSTING_CREATED | MONEY | Use customer_price_currency when explicit; otherwise UNKNOWN; never cross-currency sum | Preserve posting-item observation; higher-grain additive aggregation requires verified source amount semantics |
+| `ozon.analytics.revenue` | `sku_daily_analytics` | `revenue` | SHOP + SKU + DAY | BUSINESS_DATE | MONEY | Source currency if explicit; otherwise UNKNOWN; no cross-currency sum | SUM across compatible SKU/day rows |
+| `ozon.analytics.ordered_units` | `sku_daily_analytics` | `ordered_units` | SHOP + SKU + DAY | BUSINESS_DATE | UNITS | NOT_APPLICABLE | SUM across compatible SKU/day rows |
+| `ozon.analytics.returns` | `sku_daily_analytics` | `returns` | SHOP + SKU + DAY | BUSINESS_DATE | UNITS | NOT_APPLICABLE | SUM across compatible SKU/day rows |
+| `ozon.analytics.cancellations` | `sku_daily_analytics` | `cancellations` | SHOP + SKU + DAY | BUSINESS_DATE | UNITS | NOT_APPLICABLE | SUM across compatible SKU/day rows |
+| `ozon.analytics.delivered_units` | `sku_daily_analytics` | `delivered_units` | SHOP + SKU + DAY | BUSINESS_DATE | UNITS | NOT_APPLICABLE | SUM across compatible SKU/day rows |
+
+
+规范性说明：
+
+- `ozon.analytics.*` 来自 Ozon Analytics 日事实，不能被 O3Pilot Order Fact 覆盖；
+- `o3p.sales.buyer_paid_value` 只是订单侧买家支付观察值，不是最终 Finance Revenue；其 Source Value 本身不改变语义；若用于默认经营视图，可在查询层使用 `eligible_business_posting` 选择范围，但不得因此改写 Source Value；
+- 当前没有额外证据证明所有来源形态下 `customer_price_amount` 都可以用同一种数量乘法或高层 SUM 规则聚合，因此 A.3 不补造该公式；
+- Analytics `revenue` 当前若没有逐行显式 Currency，必须保持 Currency Unknown，不能猜测 Shop Currency。
+
+
+## 10.2 Product
+
+
+| metric_code | source | source_field | grain | time_basis | unit | currency_policy | aggregation_rule |
+|---|---|---|---|---|---|---|---|
+| `ozon.product.content_rating` | `product_content_rating_snapshot` | `total_rating` | SHOP + SKU + SNAPSHOT | SNAPSHOT_TIME | SCORE | NOT_APPLICABLE | Latest snapshot for point-in-time view; never sum scores across snapshots |
+
+
+规范性说明：
+
+- Ozon Content Rating 的权重、条件和改进建议保持 Source 语义；
+- O3Pilot 不重新定义 Ozon Content Rating Score。
+
+
+## 10.3 Price
+
+
+| metric_code | source | source_field | grain | time_basis | unit | currency_policy | aggregation_rule |
+|---|---|---|---|---|---|---|---|
+| `ozon.price.seller_price` | `product_price_snapshot` | `seller_price_amount` | SHOP + PRODUCT + SNAPSHOT | SNAPSHOT_TIME | MONEY | Use seller_price_currency; UNKNOWN if source has no explicit currency | Latest snapshot for point-in-time view |
+| `ozon.price.marketing_seller_price` | `product_price_snapshot` | `marketing_seller_price_amount` | SHOP + PRODUCT + SNAPSHOT | SNAPSHOT_TIME | MONEY | Use marketing_seller_price_currency; UNKNOWN if source has no explicit currency | Latest snapshot for point-in-time view |
+| `ozon.price.color_index` | `product_price_snapshot` | `price_index_json.color_index` | SHOP + PRODUCT + SNAPSHOT | SNAPSHOT_TIME | CATEGORY | NOT_APPLICABLE | Latest snapshot; no arithmetic aggregation |
+| `ozon.price.external_index_value` | `product_price_snapshot` | `price_index_json.external_index_data.price_index_value` | SHOP + PRODUCT + SNAPSHOT | SNAPSHOT_TIME | VALUE | Source semantics and currency preserved | Latest snapshot; no implicit cross-currency comparison |
+| `ozon.price.ozon_index_value` | `product_price_snapshot` | `price_index_json.ozon_index_data.price_index_value` | SHOP + PRODUCT + SNAPSHOT | SNAPSHOT_TIME | VALUE | Source semantics and currency preserved | Latest snapshot; no implicit cross-currency comparison |
+| `ozon.price.self_marketplaces_index_value` | `product_price_snapshot` | `price_index_json.self_marketplaces_index_data.price_index_value` | SHOP + PRODUCT + SNAPSHOT | SNAPSHOT_TIME | VALUE | Source semantics and currency preserved | Latest snapshot; no implicit cross-currency comparison |
+
+
+规范性说明：
+
+- Source Price 及 Index 不同字段可能具有不同 Currency 语义；
+- 不得在没有同币种 / Reporting Currency 的情况下直接做价格差；
+- Source Snapshot 永远不被 Derived Price Metric 反写。
+
+
+## 10.4 Shop Health
+
+
+| metric_code | source | source_field | grain | time_basis | unit | currency_policy | aggregation_rule |
+|---|---|---|---|---|---|---|---|
+| `ozon.rating.current_value` | `shop_rating_snapshot` | `value` | SHOP + RATING + SNAPSHOT | SNAPSHOT_TIME | VALUE | NOT_APPLICABLE | Latest snapshot by rating_code |
+| `ozon.rating.history_value` | `shop_rating_snapshot` | `value` | SHOP + RATING + PERIOD | BUSINESS_DATE | VALUE | NOT_APPLICABLE | Use source historical period; do not average unless source semantics permit |
+| `ozon.rating.status_danger` | `shop_rating_snapshot` | `status_danger` | SHOP + RATING + SNAPSHOT | SNAPSHOT_TIME | BOOLEAN | NOT_APPLICABLE | Latest snapshot |
+| `ozon.rating.status_warning` | `shop_rating_snapshot` | `status_warning` | SHOP + RATING + SNAPSHOT | SNAPSHOT_TIME | BOOLEAN | NOT_APPLICABLE | Latest snapshot |
+| `ozon.rating.status_premium` | `shop_rating_snapshot` | `status_premium` | SHOP + RATING + SNAPSHOT | SNAPSHOT_TIME | BOOLEAN | NOT_APPLICABLE | Latest snapshot |
+| `ozon.rating.fbs_error_index` | `fbs_error_index_snapshot` | `index_value` | SHOP + SNAPSHOT | SNAPSHOT_TIME | VALUE | NOT_APPLICABLE | Latest snapshot |
+
+
+规范性说明：
+
+- Ozon Rating Threshold 由 Ozon Source 决定，METRICS 不重新定义；
+- Seller Info 中尚未拥有 Canonical Metric Code 的 Rating/Price-Zone 字段仍属于 Source Fact，不在 A.3 为其凭空创建新 Metric Code；
+- FBS Error Posting 当前非空样本不足的明细原因指标继续保持未正式定义。
+
+
+
+---
+
+# 11. Active Derived Metric Contracts
+
+以下每个正式 Active Derived / Estimate / Derived Reference Metric 都必须完整满足 Derived 9。
+
+
+
+## 11.1 Data Quality
+
+
+| metric_code | grain | time_basis | formula | eligibility | unit | currency_policy | aggregation_rule | metric_version |
+|---|---|---|---|---|---|---|---|---|
+| `o3p.data.coverage_lag` | SOURCE | SOURCE_BUSINESS_TIME | now - latest_source_business_time | A source/domain with an authoritative latest_source_business_time | DURATION | NOT_APPLICABLE | Recompute at query time from the latest eligible source business time | 1 |
+| `o3p.data.mapping_coverage` | DOMAIN + PERIOD | BUSINESS_DATE | matched_records / eligible_records | A domain where mapping is required and eligible population is authoritative; Seller Catalog Mapping applies only when that Later domain is active | RATIO | NOT_APPLICABLE | Recompute from SUM(matched_records) / SUM(eligible_records); never AVG ratios | 1 |
+
+
+规则：
+
+- `coverage_lag` 回答业务数据覆盖到哪里，不等于 Pipeline Fetch Age；
+- `mapping_coverage` 只在该 Domain 的 Mapping 已进入当前 Phase 且 Eligible Population 可定义时适用；
+- Seller Catalog Mapping 为 Later，因此 Seller Catalog Mapping Coverage 也不能提前变成 P0 Active 实现要求。
+
+
+## 11.2 Sales
+
+
+| metric_code | grain | time_basis | formula | eligibility | unit | currency_policy | aggregation_rule | metric_version |
+|---|---|---|---|---|---|---|---|---|
+| `o3p.sales.mother_order_count` | SHOP + PERIOD | ORDER_CREATED | COUNT(DISTINCT mother_order_id) FROM eligible_business_posting | Mother order has at least one posting in eligible_business_posting | COUNT | NOT_APPLICABLE | COUNT DISTINCT at requested grain | 1 |
+| `o3p.sales.posting_count` | SHOP + PERIOD | POSTING_CREATED | COUNT(DISTINCT posting_id) FROM eligible_business_posting | posting IN eligible_business_posting | COUNT | NOT_APPLICABLE | COUNT DISTINCT at requested grain | 1 |
+| `o3p.sales.ordered_units` | SHOP + SKU + PERIOD | POSTING_CREATED | SUM(posting_item.quantity) WHERE posting IN eligible_business_posting | posting IN eligible_business_posting | UNITS | NOT_APPLICABLE | SUM quantity | 1 |
+| `o3p.sales.delivered_units` | SHOP + SKU + PERIOD | DELIVERED | SUM(posting_item.quantity) WHERE posting IN eligible_business_posting AND normalized final state = DELIVERED | posting IN eligible_business_posting AND normalized final state = DELIVERED | UNITS | NOT_APPLICABLE | SUM quantity; delivery-state mapping remains versioned | 1 |
+| `o3p.sales.post_shipment_cancelled_units` | SHOP + SKU + PERIOD | CANCELLED | SUM(posting_item.quantity) WHERE posting is eligible, reliable shipped_at exists, final state = CANCELLED, and cancellation occurred after shipment | posting IN eligible_business_posting AND verified post-shipment cancellation | UNITS | NOT_APPLICABLE | SUM quantity | 1 |
+| `o3p.sales.order_gross_value` | SHOP + SKU + PERIOD | POSTING_CREATED | SUM(posting_item.unit_price_amount * posting_item.quantity) WHERE posting IN eligible_business_posting | posting IN eligible_business_posting AND unit price is available | MONEY | Group by source currency or convert using an explicit Reporting Currency and FX policy | SUM only within a single currency/reporting currency | 1 |
+| `o3p.sales.aov_mother_order` | SHOP + PERIOD | ORDER_CREATED | o3p.sales.order_gross_value / o3p.sales.mother_order_count | Same eligible_business_posting population; denominator > 0 | MONEY | Numerator must be a single currency/reporting currency | Recompute from aggregated numerator / aggregated denominator | 1 |
+| `o3p.sales.aov_posting` | SHOP + PERIOD | POSTING_CREATED | o3p.sales.order_gross_value / o3p.sales.posting_count | Same eligible_business_posting population; denominator > 0 | MONEY | Numerator must be a single currency/reporting currency | Recompute from aggregated numerator / aggregated denominator | 1 |
+| `o3p.sales.average_unit_price` | SHOP + SKU + PERIOD | POSTING_CREATED | o3p.sales.order_gross_value / o3p.sales.ordered_units | Same eligible_business_posting population; ordered_units > 0 | MONEY | Numerator must be a single currency/reporting currency | Recompute from aggregated numerator / aggregated denominator | 1 |
+
+
+规则：
+
+- Mother Order、Posting、Posting Item Quantity 是不同计数单位；
+- `order_gross_value` 是订单侧有效订单金额，不等于 Analytics Revenue，也不等于 Finance Revenue；
+- 发货后取消 Unit 只有在可靠 Shipment Node 已存在且取消发生在其后时才能进入分子。
+
+
+## 11.3 Demand
+
+
+| metric_code | grain | time_basis | formula | eligibility | unit | currency_policy | aggregation_rule | metric_version |
+|---|---|---|---|---|---|---|---|---|
+| `o3p.demand.created_mother_order_count` | SHOP + PERIOD | ORDER_CREATED | COUNT(DISTINCT mother_order_id) over all created demand | All created mother orders, including pre-shipment cancellations | COUNT | NOT_APPLICABLE | COUNT DISTINCT at requested grain | 1 |
+| `o3p.demand.created_posting_count` | SHOP + PERIOD | POSTING_CREATED | COUNT(DISTINCT posting_id) over all created demand | All created postings, including pre-shipment cancellations | COUNT | NOT_APPLICABLE | COUNT DISTINCT at requested grain | 1 |
+| `o3p.demand.created_ordered_units` | SHOP + SKU + PERIOD | POSTING_CREATED | SUM(posting_item.quantity) over all created demand | All created posting items, including pre-shipment cancellations | UNITS | NOT_APPLICABLE | SUM quantity | 1 |
+| `o3p.demand.created_order_gross_value` | SHOP + SKU + PERIOD | POSTING_CREATED | SUM(posting_item.unit_price_amount * posting_item.quantity) over all created demand | All created posting items with price, including pre-shipment cancellations | MONEY | Group by source currency or convert using an explicit Reporting Currency and FX policy | SUM only within a single currency/reporting currency | 1 |
+
+
+规则：
+
+Created Demand 包含发货前取消，用于观察真实下单需求；不得与默认经营 Sales Metric 合并。
+
+
+## 11.4 Product
+
+
+| metric_code | grain | time_basis | formula | eligibility | unit | currency_policy | aggregation_rule | metric_version |
+|---|---|---|---|---|---|---|---|---|
+| `o3p.product.missing_recommended_attribute_count` | SHOP + SKU + SNAPSHOT | SNAPSHOT_TIME | COUNT(DISTINCT improve_attribute_id) | Current Ozon Content Rating improve_attributes are available | COUNT | NOT_APPLICABLE | COUNT DISTINCT within the selected snapshot | 1 |
+| `o3p.product.content_rating_change` | SHOP + SKU + SNAPSHOT | SNAPSHOT_TIME | latest_content_rating - previous_content_rating | At least two ordered Product Content Rating snapshots | SCORE_DELTA | NOT_APPLICABLE | Do not sum snapshot deltas; compare the selected snapshot pair | 1 |
+
+
+规则：
+
+`missing_recommended_attribute_count` 只统计 Ozon 当前 Content Rating `improve_attributes`，不是类目全部理论缺失属性。
+
+
+## 11.5 Price
+
+
+| metric_code | grain | time_basis | formula | eligibility | unit | currency_policy | aggregation_rule | metric_version |
+|---|---|---|---|---|---|---|---|---|
+| `o3p.price.discount_rate` | SHOP + PRODUCT + SNAPSHOT | SNAPSHOT_TIME | (old_price - seller_price) / old_price | old_price > 0 and both prices are comparable in the same currency | RATIO | Prices must be same currency/reporting currency | Recompute from comparable price values; no AVG across products unless explicitly requested | 1 |
+| `o3p.price.competitive_gap` | SHOP + PRODUCT + SNAPSHOT | SNAPSHOT_TIME | seller_price_reporting / reference_price_reporting - 1 | An explicit reference price is selected and both prices are converted to the same Reporting Currency | RATIO | Both prices must share Reporting Currency; retain FX policy | Do not aggregate across different reference-price contexts as one value | 1 |
+
+
+规则：
+
+`competitive_gap` 必须明确当前使用的 Reference Price Context。不同 Reference Source 的结果不得在缺少上下文时混成一个值。
+
+
+## 11.6 Inventory
+
+
+| metric_code | grain | time_basis | formula | eligibility | unit | currency_policy | aggregation_rule | metric_version |
+|---|---|---|---|---|---|---|---|---|
+| `o3p.inventory.sellable_stock` | SHOP + SKU + SNAPSHOT | SNAPSHOT_TIME | SUM(inventory_snapshot.present) | Selected shop/SKU/stock_type/warehouse scope; observed snapshot is valid | UNITS | NOT_APPLICABLE | SUM present within the same snapshot scope; never compute present - reserved | 1 |
+| `o3p.inventory.reserved_stock` | SHOP + SKU + SNAPSHOT | SNAPSHOT_TIME | SUM(inventory_snapshot.reserved) | Selected shop/SKU/stock_type/warehouse scope; observed snapshot is valid | UNITS | NOT_APPLICABLE | SUM reserved within the same snapshot scope | 1 |
+| `o3p.inventory.in_transit_stock` | SHOP + SKU + SNAPSHOT | SNAPSHOT_TIME | SUM(eligible normalized in-transit quantity) | P1 manual in-transit input path is normalized; eligible state mapping is known for the selected source | UNITS | NOT_APPLICABLE | SUM only eligible current in-transit quantities; never merge into Current Inventory | 1 |
+| `o3p.inventory.calendar_ads_units` | SHOP + SKU + PERIOD | POSTING_CREATED | eligible_ordered_units_in_window / calendar_days_in_window | Window is explicit; ordered units follow eligible_business_posting; calendar_days_in_window > 0 | UNITS_PER_DAY | NOT_APPLICABLE | Recompute from aggregated numerator / calendar-day denominator | 1 |
+| `o3p.inventory.adjusted_ads_units` | SHOP + SKU + PERIOD | POSTING_CREATED | eligible_ordered_units_on_available_days / available_days | Window is explicit; availability coverage is reliable; available_days > 0 | UNITS_PER_DAY | NOT_APPLICABLE | Recompute from aggregated numerator / available-day denominator | 1 |
+| `ozon.reference.product_availability` | SHOP + SKU + PERIOD | SNAPSHOT_TIME | time product was sellable in at least one eligible FBP/rFBS mode / total observation time | Ozon reference applicability and observation coverage are available | RATIO | NOT_APPLICABLE | Recompute reference numerator / denominator; do not equate to O3Pilot snapshot availability without reconciliation | 1 |
+| `o3p.inventory.availability_rate` | SHOP + SKU + PERIOD | SNAPSHOT_TIME | available_eligible_days / eligible_observed_days | Inventory coverage is reliable; Sync Gap days are excluded; denominator > 0 | RATIO | NOT_APPLICABLE | Recompute from aggregated available days / eligible observed days | 1 |
+| `o3p.inventory.out_of_stock_days` | SHOP + SKU + PERIOD | SNAPSHOT_TIME | eligible_observed_days - available_eligible_days | Observed-day coverage is reliable | DAYS | NOT_APPLICABLE | SUM day classifications only over non-overlapping observation days | 1 |
+| `o3p.inventory.days_of_cover` | SHOP + SKU + SNAPSHOT | SNAPSHOT_TIME | sellable_stock / adjusted_ads_units | Current sellable_stock available; adjusted_ads_units > 0; otherwise NO_RECENT_DEMAND | DAYS | NOT_APPLICABLE | Recompute from current stock and compatible ADS; never average Days of Cover across SKU unless explicitly requested | 1 |
+| `o3p.inventory.supply_days_of_cover` | SHOP + SKU + SNAPSHOT | SNAPSHOT_TIME | (sellable_stock + eligible_in_transit_stock) / adjusted_ads_units | Current stock and eligible in-transit stock available; adjusted_ads_units > 0 | DAYS | NOT_APPLICABLE | Recompute from stock components and compatible ADS | 1 |
+| `o3p.inventory.lost_sales_estimate` | SHOP + SKU + PERIOD | BUSINESS_DATE | average_sales_amount_per_available_day * out_of_stock_days | Same-currency sales observations; data-gap days excluded; explicit observation window | MONEY | Use one source/reporting currency; never cross-currency multiply/sum | Recompute from compatible available-day sales basis and out-of-stock days | 1 |
+
+
+规则：
+
+- `sellable_stock` 使用已验证 `present` 语义；不得计算 `present - reserved` 伪造可售库存；
+- Current Stock 与 In-transit Stock 永远分开；
+- In-transit P1 当前必须支持 Manual Path，但 A.3 不重新复活 Deferred 的完整 Supply / SupplyItem Schema；
+- `adjusted_ads_units` 的不可用日必须依赖可靠库存覆盖，不得把 Missing Snapshot 当成缺货；
+- `days_of_cover` 在 ADS 为 0 时返回 `NO_RECENT_DEMAND`，不得返回 999 天等伪造大数。
+
+Ozon Lost Sales 仍保留为 Reference Rule，而不是在缺少既有 Canonical Code 时由 A.3 新造 Metric Code：
 
 ```text
 daily_average_sales_amount
@@ -1764,9 +943,7 @@ daily_average_sales_amount
 28-day sales amount
 /
 days product was available
-```
 
-```text
 lost_sales
 =
 daily_average_sales_amount
@@ -1774,810 +951,95 @@ daily_average_sales_amount
 out_of_stock_days
 ```
 
-对于仅以 rFBS 销售的商品，Ozon 当前参考规则还会在结果基础上增加 30%。
+当前 Ozon 对仅 rFBS 商品的参考规则还可能包含 +30%。该 Reference 不自动成为 O3Pilot `lost_sales_estimate` 的公式。
 
-因此该指标必须标记：
 
-```text
-metric_origin = OZON_REFERENCE
-```
-
-O3Pilot 不默认把 +30% 规则应用到自己的 Lost Sales Estimate。
-
----
-
-# 26. O3Pilot Lost Sales Estimate
-
-```text
-metric_code:
-o3p.inventory.lost_sales_estimate
-```
-
-基础公式：
-
-```text
-average_sales_amount_per_available_day
-*
-out_of_stock_days
-```
-
-属于：
-
-```text
-O3P_ESTIMATE
-```
-
-要求：
-
-- 使用同币种；
-- 排除数据缺口日；
-- 保留观察窗口；
-- 保留估算版本。
-
-该值表示：
-
-```text
-estimated unrealized sales
-```
-
-不是 Finance Fact。
-
----
-
-# 27. Ozon 补货建议 Reference
-
-Ozon 当前 Reference 中：
-
-```text
-< 10 days
-→ 紧急交货
-
-10 ~ 30 days
-→ 即将交货
-
-> 30 days
-→ 目前足够
-```
-
-另外存在：
-
-- rFBS 日均销量 > 1 时建议转 FBP；
-- 过去 60 天无 FBP 销售或库存可维持 90 天以上时可能标记“不交货”；
-- 推荐量会考虑当前库存和在途库存；
-- 销售分析周期可以使用 7 / 14 / 28 / 56 天。
-
-这些阈值属于：
-
-```text
-OZON_REFERENCE
-```
-
-不得自动成为 O3Pilot 永久经营规则。
-
----
-
-# 28. O3Pilot Forecast Replenishment
-
-```text
-metric_code:
-o3p.inventory.recommended_replenishment_units
-```
-
-标准公式：
-
-```text
-required_units
-=
-forecast_demand(
-    lead_time_days + target_cover_days
-)
-+
-safety_stock_units
-```
-
-```text
-recommended_replenishment_units
-=
-MAX(
-    0,
-    CEIL(
-        required_units
-        - sellable_stock
-        - eligible_in_transit_stock
-    )
-)
-```
-
-其中：
-
-```text
-lead_time_days
-```
-
-来自卖家采购 / 备货 / 运输参数。
-
-```text
-target_cover_days
-```
-
-为经营 Policy。
-
-不得在 METRICS v1.0 中永久固定成某一个天数。
-
----
-
-# 29. Baseline Replenishment Estimate
-
-当 Forecast 尚不可用时：
-
-```text
-baseline_demand
-=
-adjusted_ads_units
-*
-(lead_time_days + target_cover_days)
-```
-
-再使用同一补货公式。
-
-此时：
-
-```text
-metric_origin = O3P_ESTIMATE
-```
-
-不能标成 Forecast。
-
----
-
-# 30. 履约时效基础指标
-
-所有 Duration 使用：
-
-```text
-seconds
-```
-
-作为内部标准单位。
-
-前端可展示：
-
-- 小时；
-- 天；
-- P50 / P90。
-
----
-
-# 31. Order → Handover
-
-```text
-o3p.fulfillment.order_to_handover_duration
-=
-handover_to_delivery_at
--
-created_at_source
-```
-
-要求：
-
-```text
-handover_to_delivery_at >= created_at_source
-```
-
-异常负值：
-
-```text
-UNVERIFIED / DATA_QUALITY_ISSUE
-```
-
----
-
-# 32. Processing → Handover
-
-```text
-o3p.fulfillment.processing_to_handover_duration
-=
-handover_to_delivery_at
--
-in_process_at
-```
-
----
-
-# 33. Handover → Delivery
-
-```text
-o3p.fulfillment.delivery_transit_duration
-=
-fact_delivery_date
--
-handover_to_delivery_at
-```
-
----
-
-# 34. Order → Delivery
-
-```text
-o3p.fulfillment.order_to_delivery_duration
-=
-fact_delivery_date
--
-created_at_source
-```
-
----
-
-# 35. 时效分位数
-
-对任何 Duration：
-
-```text
-P50 = percentile(samples, 0.50)
-P90 = percentile(samples, 0.90)
-Average = mean(samples)
-```
-
-必须同时展示：
-
-```text
-sample_count
-```
-
-如果某业务模式实际妥投时间缺失较多：
-
-状态：
-
-```text
-PARTIAL
-```
-
----
-
-# 36. 按时发货率
-
-```text
-metric_code:
-o3p.fulfillment.on_time_handover_rate
-```
-
-Eligible Population：
-
-具有：
-
-```text
-shipment_deadline_at
-handover_to_delivery_at
-```
-
-且未在发货前取消的 Posting。
-
-公式：
-
-```text
-COUNT(handover_at <= shipment_deadline_at)
-/
-COUNT(eligible postings)
-```
-
-它是 O3Pilot Operational Metric。
-
-不等同于 Ozon Rating。
-
----
-
-# 37. 承诺配送达成率
-
-```text
-o3p.fulfillment.promise_delivery_hit_rate
-```
-
-Eligible：
-
-同时拥有：
-
-```text
-promised_delivery_to
-fact_delivery_date
-```
-
-公式：
-
-```text
-COUNT(fact_delivery_date <= promised_delivery_to)
-/
-COUNT(eligible delivered postings)
-```
-
----
-
-# 38. 发货截止时间变化
-
-```text
-o3p.fulfillment.deadline_shift_hours
-=
-latest_shipment_deadline
--
-initial_shipment_deadline
-```
-
-正值：
-
-Ozon 将 Deadline 向后延。
-
-负值：
-
-Deadline 提前。
-
-基于：
-
-```text
-posting_schedule_history
-```
-
----
-
-# 39. 承诺配送窗口变化
-
-```text
-o3p.fulfillment.promise_window_shift_hours
-```
-
-必须分别保存：
-
-```text
-from_shift
-to_shift
-```
-
-不要只保存一个“改变了 X 小时”。
-
----
-
-# 40. 时效数据完整度
-
-## Handover Completeness
+## 11.7 Fulfillment
 
-```text
-o3p.quality.handover_time_completeness
-=
-postings_with_handover_time
-/
-eligible_postings
-```
-
-## Delivery Completeness
-
-```text
-o3p.quality.delivery_time_completeness
-=
-delivered_postings_with_fact_delivery
-/
-delivered_postings
-```
-
----
-
-# 41. Ozon 官方取消指标 Reference
-
-当前知识库中存在两个不同的官方取消相关口径。
-
-不能合并。
-
-## 41.1 Seller Center Fulfillment Report — 7 Day
-
-按包裹数：
-
-```text
-ozon.reference.cancellation_rate_7d_count
-=
-seller_cancelled_shipments_in_7d
-/
-created_shipments_in_7d
-```
-
-按包裹货值：
-
-```text
-ozon.reference.cancellation_rate_7d_value
-=
-value_of_seller_cancelled_shipments
-/
-value_of_created_shipments
-```
-
-报告中存在：
-
-```text
-Accounted in numerator
-Accounted in denominator
-```
-
-因此如用户导入官方报告，应优先使用这些官方标志对账。
-
----
-
-## 41.2 Ozon Service Quality — 14 Day
-
-官方服务质量资料描述：
-
-```text
-seller-responsible cancelled shipments
-/
-all eligible shipments
-```
-
-观察最近 14 天，并不统计当天。
-
-卖家责任当前包括官方资料列出的：
-
-- 卖家主动取消；
-- Ozon 因延迟发货超过 7 天取消等情况。
-
-该口径与 7 天 Fulfillment Report 指标不假定完全相同。
-
----
-
-# 42. O3Pilot Cancellation Rate
-
-O3Pilot 将取消拆成两个生命周期阶段：
-
-```text
-PRE_SHIPMENT_CANCELLATION
-POST_SHIPMENT_CANCELLATION
-```
-
-默认经营 Cancellation Rate **只排除已经确认的发货前取消订单**。
-
-待发货但未取消订单仍保留在默认分母中。
-
----
-
-# 42.1 发货前取消率
-
-```text
-metric_code:
-o3p.cancellation.pre_shipment_rate
-```
-
-公式：
-
-```text
-pre_shipment_cancelled_postings
-/
-created_postings
-```
-
-Cohort：
-
-```text
-POSTING_CREATED
-```
-
-其中：
-
-```text
-pre_shipment_cancelled_posting
-=
-Posting 在形成可靠 shipped_at 之前已经最终取消
-```
-
-该指标单独观察发货前损失。
-
----
-
-# 42.2 默认订单取消率
-
-```text
-metric_code:
-o3p.cancellation.posting_rate
-```
-
-公式：
-
-```text
-post_shipment_cancelled_postings
-/
-eligible_business_postings
-```
-
-其中分母：
-
-```text
-eligible_business_postings
-=
-created_postings
-- confirmed_pre_shipment_cancelled_postings
-```
-
-因此分母包含：
-
-- 尚未发货且未取消；
-- 已发货；
-- 运输中；
-- 已签收；
-- 发货后取消。
-
-分母排除：
-
-- 已确认发货前取消。
-
-分子只包含：
-
-- 已确认发生在发货后的取消 Posting。
-
-因此待发货未取消订单会进入分母，但不会进入分子。
-
-近期 Cohort 可能因为待发货订单未来发生发货前取消而被修订，允许标记：
-
-```text
-OPEN_COHORT
-```
-
----
-
-# 42.3 买家责任取消率
-
-```text
-metric_code:
-o3p.cancellation.buyer_rate
-```
-
-公式：
 
-```text
-buyer_responsible_post_shipment_cancelled_postings
-/
-eligible_business_postings
-```
-
-买家责任必须根据：
-
-- Cancellation Initiator；
-- Reason；
-- Ozon Raw Fields；
-- Mapping Version；
-
-判断。
-
-无法确认：
-
-```text
-UNKNOWN
-```
-
-不得自动归为买家责任。
-
----
-
-# 42.4 卖家责任取消率
-
-```text
-metric_code:
-o3p.cancellation.seller_responsible_rate
-```
-
-公式：
-
-```text
-seller_responsible_post_shipment_cancelled_postings
-/
-eligible_business_postings
-```
-
-责任同样必须基于标准化 Cancellation Mapping。
-
-注意：
-
-该指标是 O3Pilot 自算指标。
-
-它不等于 Ozon Service Quality 官方卖家责任取消率，因为官方指标可能拥有不同时间窗、资格规则和责任判定。
-
----
-
-# 42.5 取消商品件数率
-
-```text
-metric_code:
-o3p.cancellation.unit_rate
-```
-
-公式：
-
-```text
-post_shipment_cancelled_units
-/
-eligible_ordered_units
-```
-
-`eligible_ordered_units` 包含待发货未取消订单件数，排除已确认发货前取消件数。
-
----
-
-# 42.6 Cancellation Stage Coverage
-
-```text
-o3p.cancellation.stage_coverage
-=
-cancelled_postings_with_verified_pre_or_post_shipment_stage
-/
-all_cancelled_postings_requiring_stage_classification
-```
-
-如果无法可靠区分：
-
-```text
-发货前取消
-vs
-发货后取消
-```
-
-相关取消指标必须标记：
-
-```text
-PARTIAL
-```
-
-不能把未知取消阶段自动归到发货前取消，也不能据此从默认经营集合删除。
-
----
-
-# 43. Ozon 逾期交货 Reference
-
-Seller Center 当前 Reference：
-
-观察最近 14 天。
-
-```text
-ozon.reference.shipment_delay_rate_14d
-=
-shipments_delayed_due_to_seller
-/
-shipments_that_should_have_been_handed_over
-```
-
-官方报告可包含：
-
-```text
-Accounted in numerator
-Accounted in denominator
-Delay in calendar days
-```
-
-因此官方报告导入可以用于核对 O3Pilot 的时效派生指标。
-
----
-
-# 44. 退货指标分类
-
-退货必须区分：
-
-```text
-RETURN_REQUEST
-CUSTOMER_RETURN
-UNCLAIMED
-CANCELLATION_REVERSE_FLOW
-WHD
-RETURN_TO_SELLER
-DESTROYED
-COMPENSATED
-```
-
-不能把 `/v1/returns/list` 中所有 `Cancellation` 都当作“客户退货”。
-
----
-
-# 45. Return Request Rate
+| metric_code | grain | time_basis | formula | eligibility | unit | currency_policy | aggregation_rule | metric_version |
+|---|---|---|---|---|---|---|---|---|
+| `o3p.fulfillment.shipped_units` | SHOP + SKU + PERIOD | HANDOVER | SUM(posting_item.quantity) WHERE posting IN eligible_business_posting AND reliable shipped_at exists | posting IN eligible_business_posting AND reliable shipped_at exists | UNITS | NOT_APPLICABLE | SUM quantity | 1 |
+| `o3p.fulfillment.order_to_handover_duration` | POSTING | ORDER_CREATED → HANDOVER | handover_at - order_created_at | Both timestamps exist and handover_at >= order_created_at | SECONDS | NOT_APPLICABLE | Percentiles/mean must be recomputed from raw posting-level durations | 1 |
+| `o3p.fulfillment.processing_to_handover_duration` | POSTING | PROCESSING_STARTED → HANDOVER | handover_at - in_process_at | Both timestamps exist and handover_at >= in_process_at | SECONDS | NOT_APPLICABLE | Percentiles/mean must be recomputed from raw posting-level durations | 1 |
+| `o3p.fulfillment.delivery_transit_duration` | POSTING | HANDOVER → DELIVERED | fact_delivery_date - handover_at | Both timestamps exist and fact_delivery_date >= handover_at | SECONDS | NOT_APPLICABLE | Percentiles/mean must be recomputed from raw posting-level durations | 1 |
+| `o3p.fulfillment.order_to_delivery_duration` | POSTING | ORDER_CREATED → DELIVERED | fact_delivery_date - order_created_at | Both timestamps exist and fact_delivery_date >= order_created_at | SECONDS | NOT_APPLICABLE | Percentiles/mean must be recomputed from raw posting-level durations | 1 |
+| `o3p.fulfillment.on_time_handover_rate` | SHOP + FULFILLMENT_MODE + PERIOD | HANDOVER | COUNT(handover_at <= shipment_deadline_at) / COUNT(eligible_postings) | Posting not pre-shipment-cancelled; shipment_deadline_at and handover_at exist; denominator > 0 | RATIO | NOT_APPLICABLE | Recompute from summed on-time count / eligible count | 1 |
+| `o3p.fulfillment.promise_delivery_hit_rate` | SHOP + FULFILLMENT_MODE + PERIOD | DELIVERED | COUNT(fact_delivery_date <= promised_delivery_to) / COUNT(eligible_delivered_postings) | promised_delivery_to and fact_delivery_date exist; denominator > 0 | RATIO | NOT_APPLICABLE | Recompute from summed hit count / eligible delivered count | 1 |
+| `o3p.fulfillment.deadline_shift_hours` | POSTING | SNAPSHOT_TIME | (latest_shipment_deadline - initial_shipment_deadline) in hours | At least initial and latest posting_schedule_history values exist | HOURS | NOT_APPLICABLE | Compare selected initial/latest schedule values; do not sum repeated snapshots | 1 |
+| `o3p.quality.handover_time_completeness` | SHOP + PERIOD | POSTING_CREATED | postings_with_handover_time / eligible_postings | An authoritative eligible posting population exists; denominator > 0 | RATIO | NOT_APPLICABLE | Recompute from summed numerator / denominator | 1 |
+| `o3p.quality.delivery_time_completeness` | SHOP + PERIOD | DELIVERED | delivered_postings_with_fact_delivery / delivered_postings | An authoritative delivered posting population exists; denominator > 0 | RATIO | NOT_APPLICABLE | Recompute from summed numerator / denominator | 1 |
+| `ozon.reference.shipment_delay_rate_14d` | SHOP + PERIOD | HANDOVER | shipments_delayed_due_to_seller / shipments_that_should_have_been_handed_over | Official service-quality/report reference population is available; denominator > 0 | RATIO | NOT_APPLICABLE | Recompute from official-reference numerator / denominator | 1 |
 
-如果需要观察买家发起退货行为：
 
-```text
-o3p.return.request_rate
-=
-return_requested_units
-/
-delivered_units_in_eligible_cohort
-```
-
-包括被拒绝的 Request 与否必须由 Metric Variant 明确。
-
-建议两个 Variant：
-
-```text
-request_all
-request_accepted
-```
-
----
-
-# 46. 产品退货率
-
-这是 O3Pilot 核心派生指标。
-
-```text
-metric_code:
-o3p.product.return_rate
-```
+规则：
 
-## 46.1 Primary Definition
+所有 Duration 内部使用 seconds。
 
-Cohort：
+如果：
 
 ```text
-DELIVERY_COHORT
+end_time < start_time
 ```
 
-分母：
+结果：
 
 ```text
-delivered_units_in_cohort
+UNVERIFIED
 ```
 
-分子：
+并进入 Data Quality investigation，不静默取绝对值。
 
-```text
-completed_customer_return_units
-linked back to those delivered units
-as of calculation time
-```
+P50 / P90 / Average 从 Posting-level Duration 原始样本重新计算，并在适用时展示 `sample_count`。
 
-公式：
+旧 `o3p.fulfillment.promise_window_shift_hours` 不再作为一个多值正式 Metric。承诺窗口变更必须分别比较：
 
 ```text
-completed_customer_return_units_as_of
-/
-delivered_units_in_cohort
+promised_delivery_from shift
+promised_delivery_to shift
 ```
-
----
-
-## 46.2 不计入分子
 
-默认不计入产品退货率：
+该规则保留在 Schedule Comparison，不强迫一个 Metric Result 同时装两个 value。
 
-- 发货前取消；
-- 未提件；
-- 仅创建但被拒绝的退货申请；
-- 无法可靠关联到原销售的逆向记录；
-- WHD 二次销售本身。
 
-这些应使用其他指标观察。
+## 11.8 Cancellation
 
----
 
-## 46.3 Open Cohort
+| metric_code | grain | time_basis | formula | eligibility | unit | currency_policy | aggregation_rule | metric_version |
+|---|---|---|---|---|---|---|---|---|
+| `ozon.reference.cancellation_rate_7d_count` | SHOP + PERIOD | POSTING_CREATED | seller_cancelled_shipments_in_7d / created_shipments_in_7d | Official Fulfillment Report reference population/flags are available; denominator > 0 | RATIO | NOT_APPLICABLE | Recompute from official-reference numerator / denominator; do not merge with 14-day service-quality metric | 1 |
+| `ozon.reference.cancellation_rate_7d_value` | SHOP + PERIOD | POSTING_CREATED | value_of_seller_cancelled_shipments / value_of_created_shipments | Official Fulfillment Report reference population/flags are available; denominator > 0 | RATIO | Numerator and denominator values must be comparable in the same currency | Recompute from official-reference value numerator / denominator | 1 |
+| `o3p.cancellation.pre_shipment_rate` | SHOP + POSTING_CREATED_COHORT | POSTING_CREATED | pre_shipment_cancelled_postings / created_postings | Created posting population authoritative; cancellation stage verified; denominator > 0 | RATIO | NOT_APPLICABLE | Recompute from summed numerator / denominator | 1 |
+| `o3p.cancellation.posting_rate` | SHOP + ELIGIBLE_ORDER_COHORT | POSTING_CREATED | post_shipment_cancelled_postings / eligible_business_postings | eligible_business_postings = created - confirmed pre-shipment cancellations; denominator > 0 | RATIO | NOT_APPLICABLE | Recompute from summed numerator / denominator | 1 |
+| `o3p.cancellation.buyer_rate` | SHOP + ELIGIBLE_ORDER_COHORT | POSTING_CREATED | buyer_responsible_post_shipment_cancelled_postings / eligible_business_postings | Responsibility determined by normalized cancellation mapping; UNKNOWN is not assigned to buyer; denominator > 0 | RATIO | NOT_APPLICABLE | Recompute from summed numerator / denominator | 1 |
+| `o3p.cancellation.seller_responsible_rate` | SHOP + ELIGIBLE_ORDER_COHORT | POSTING_CREATED | seller_responsible_post_shipment_cancelled_postings / eligible_business_postings | Responsibility determined by normalized cancellation mapping; denominator > 0 | RATIO | NOT_APPLICABLE | Recompute from summed numerator / denominator | 1 |
+| `o3p.cancellation.unit_rate` | SHOP + SKU + ELIGIBLE_ORDER_COHORT | POSTING_CREATED | post_shipment_cancelled_units / eligible_ordered_units | Eligible ordered units exclude confirmed pre-shipment cancellations; denominator > 0 | RATIO | NOT_APPLICABLE | Recompute from summed numerator / denominator | 1 |
+| `o3p.cancellation.stage_coverage` | SHOP + PERIOD | CANCELLED | cancelled_postings_with_verified_pre_or_post_shipment_stage / all_cancelled_postings_requiring_stage_classification | Cancelled postings require lifecycle-stage classification; denominator > 0 | RATIO | NOT_APPLICABLE | Recompute from summed classified / required-to-classify counts | 1 |
 
-最近交付的商品未来仍可能退货。
 
-因此近期 Product Return Rate 必须保存：
+规则：
 
-```text
-as_of_date
-cohort_status = OPEN_COHORT
-```
-
-当前资料不足以为所有商品类目硬编码统一“退货成熟期”。
+- Ozon 7-day Fulfillment Report 与 Ozon 14-day Service Quality 不是同一个口径；
+- O3Pilot Cancellation 指标不宣称等于 Ozon 官方 Rating；
+- 无法确认 Pre/Post-shipment Stage 时不得猜测，相关结果至少为 `PARTIAL`；
+- 责任无法确认时保持 Unknown Classification，不自动归给买家或卖家。
 
-因此 v1.0 不定义固定：
-
-```text
-30 天后一定 FINAL
-```
 
----
+## 11.9 Returns
 
-## 46.4 Return Unit 去重
 
-同一个 Posting Item 可能出现：
+| metric_code | grain | time_basis | formula | eligibility | unit | currency_policy | aggregation_rule | metric_version |
+|---|---|---|---|---|---|---|---|---|
+| `o3p.return.request_rate` | SHOP + PRODUCT + DELIVERY_COHORT | DELIVERY_COHORT | return_requested_units / delivered_units_in_eligible_cohort | Return-request variant (all or accepted) is explicit; delivered cohort authoritative; denominator > 0 | RATIO | NOT_APPLICABLE | Recompute from summed request units / delivered units for the same variant | 1 |
+| `o3p.product.return_rate` | SHOP + PRODUCT + DELIVERY_COHORT | DELIVERY_COHORT | completed_customer_return_units_as_of / delivered_units_in_cohort | Delivered cohort is authoritative; returns are reliably linked to original sold units; denominator > 0 | RATIO | NOT_APPLICABLE | Recompute from deduplicated returned units / delivered cohort units | 1 |
+| `o3p.return.reason_share` | SHOP + REASON_GROUP + PERIOD | RETURN_COMPLETED | returned_units_for_reason / all_returned_units | Standardized Reason Group is available; denominator > 0 | RATIO | NOT_APPLICABLE | Recompute from summed reason units / all returned units | 1 |
+| `o3p.whd.resale_rate` | SHOP + PRODUCT + PERIOD | RETURN_COMPLETED | units_resold_from_whd / units_entered_whd | reverse_logistics_link reliably connects Return → WHD → Resale; denominator > 0 | RATIO | NOT_APPLICABLE | Recompute from linked WHD units; never match by SKU alone | 1 |
+| `o3p.whd.recovery_revenue` | SHOP + PRODUCT + PERIOD | BUSINESS_DATE | SUM(recognized_revenue_from_linked_whd_resales) | reverse_logistics_link reliably connects Return → WHD → Resale | MONEY | Group by currency or convert with explicit Reporting Currency/FX policy | SUM only linked recognized revenue in a single currency/reporting currency | 1 |
 
-- 多次状态更新；
-- List / Detail 重复观察；
-- 多个逆向物流阶段；
-- WHD 后续事件。
 
-因此每个原始售出 Unit 在 Product Return Rate 分子中最多计入一次。
+产品退货率为核心 P1 Metric。
 
-原则：
+同一售出 Unit 在 Product Return Rate 分子最多计一次：
 
 ```text
 completed_returned_units
@@ -2585,1896 +1047,222 @@ completed_returned_units
 eligible_delivered_units
 ```
 
-如果来源关系无法可靠判定是否为同一实物：
+默认不计入 Product Return Rate 分子：
 
-```text
-status = PARTIAL
-```
+- 发货前取消；
+- 未提件；
+- 仅创建但被拒绝的 Return Request；
+- 无法可靠关联到原销售的逆向记录；
+- WHD 二次销售本身。
 
-不得把所有逆向记录直接相加。
+Recent Delivery Cohort 可以保持 `OPEN_COHORT`。
 
----
+Return Request Rate 的 `request_all` / `request_accepted` 语义必须作为明确 Result Variant Context 暴露，不能静默切换。
 
-# 47. 退货原因占比
 
-```text
-o3p.return.reason_share
-=
-returned_units_for_reason
-/
-all_returned_units
-```
+## 11.10 Buyout
 
-按标准化 Reason Group 聚合。
 
-Raw Reason 必须保留。
+| metric_code | grain | time_basis | formula | eligibility | unit | currency_policy | aggregation_rule | metric_version |
+|---|---|---|---|---|---|---|---|---|
+| `ozon.reference.buyout_rate_last_50_orders` | SHOP + PRODUCT + ORDER_COHORT | BUYOUT_ELIGIBLE_COHORT | (order_count - return_count - cancellation_count) / order_count | Ozon reference cohort contains up to the latest 50 eligible orders; denominator > 0 | RATIO | NOT_APPLICABLE | Recompute from official-reference components; do not invent category/price-band thresholds | 1 |
+| `o3p.product.buyout_rate` | SHOP + PRODUCT + BUYOUT_ELIGIBLE_COHORT | BUYOUT_ELIGIBLE_COHORT | buyout_success_units_as_of / buyout_eligible_units | Pre-shipment cancellations excluded; unit has reached buyout eligibility; denominator > 0 | RATIO | NOT_APPLICABLE | Recompute from deduplicated success units / buyout eligible units | 1 |
+| `o3p.product.non_buyout_rate` | SHOP + PRODUCT + BUYOUT_ELIGIBLE_COHORT | BUYOUT_ELIGIBLE_COHORT | 1 - o3p.product.buyout_rate | o3p.product.buyout_rate is available for the same cohort | RATIO | NOT_APPLICABLE | Use same denominator as buyout rate; components must not double-count | 1 |
 
----
 
-# 48. Ozon 认购水平 Reference
+规则：
 
-Ozon 当前“已认购商品”处于测试模式。
+- Ozon 最近最多 50 单 Reference 与 O3Pilot Buyout Rate 是两个独立 Metric；
+- Ozon 类目 / 价格区间的低中高阈值当前不属于稳定 Metric Contract，不自行猜测；
+- O3Pilot Buyout 先排除发货前取消，但只有达到 Buyout Eligibility 的 Unit 才进入分母；
+- 无法可靠区分未认购、发货后取消和客户退货时，Result 为 `PARTIAL`。
 
-官方 Reference 对每件商品使用：
 
-```text
-最近最多 50 个订单
-```
-
-如果少于 50 个，则使用所有订单。
-
-公式：
-
-```text
-ozon.reference.buyout_rate_last_50_orders
-=
-(order_count - return_count - cancellation_count)
-/
-order_count
-```
-
-官方还根据：
-
-- 类目；
-- 价格区段；
-
-把结果划分为低 / 中 / 高水平。
-
-这些阈值不是当前 O3Pilot API Contract 的稳定数据，因此不能自行猜测。
 
 ---
 
-# 49. O3Pilot 认购率
+# 12. Optional Extension Bindings
 
-O3Pilot 自算认购率先应用全局订单资格规则：发货前取消订单完全排除，待发货未取消订单仍属于有效订单集合。
+Optional Extension 只在需要时出现，不形成所有 Metric 的第二套大模板。
 
-但认购率本身还需要达到认购资格阶段，因此待发货订单不会仅因为“有效”就进入认购率分母。
+## 12.1 Numerator / Denominator
 
-```text
-metric_code:
-o3p.product.buyout_rate
-```
 
-Cohort：
+| metric_code | numerator | denominator |
+|---|---|---|
+| `o3p.data.mapping_coverage` | matched_records | eligible_records |
+| `o3p.sales.aov_mother_order` | o3p.sales.order_gross_value | o3p.sales.mother_order_count |
+| `o3p.sales.aov_posting` | o3p.sales.order_gross_value | o3p.sales.posting_count |
+| `o3p.sales.average_unit_price` | o3p.sales.order_gross_value | o3p.sales.ordered_units |
+| `o3p.price.discount_rate` | old_price - seller_price | old_price |
+| `o3p.price.competitive_gap` | seller_price_reporting | reference_price_reporting |
+| `o3p.inventory.calendar_ads_units` | eligible_ordered_units_in_window | calendar_days_in_window |
+| `o3p.inventory.adjusted_ads_units` | eligible_ordered_units_on_available_days | available_days |
+| `ozon.reference.product_availability` | sellable_observation_time | total_observation_time |
+| `o3p.inventory.availability_rate` | available_eligible_days | eligible_observed_days |
+| `o3p.inventory.days_of_cover` | sellable_stock | adjusted_ads_units |
+| `o3p.inventory.supply_days_of_cover` | sellable_stock + eligible_in_transit_stock | adjusted_ads_units |
+| `o3p.fulfillment.on_time_handover_rate` | on_time_handover_postings | eligible_postings |
+| `o3p.fulfillment.promise_delivery_hit_rate` | promise_hit_postings | eligible_delivered_postings |
+| `o3p.quality.handover_time_completeness` | postings_with_handover_time | eligible_postings |
+| `o3p.quality.delivery_time_completeness` | delivered_postings_with_fact_delivery | delivered_postings |
+| `ozon.reference.cancellation_rate_7d_count` | seller_cancelled_shipments_in_7d | created_shipments_in_7d |
+| `ozon.reference.cancellation_rate_7d_value` | value_of_seller_cancelled_shipments | value_of_created_shipments |
+| `o3p.cancellation.pre_shipment_rate` | pre_shipment_cancelled_postings | created_postings |
+| `o3p.cancellation.posting_rate` | post_shipment_cancelled_postings | eligible_business_postings |
+| `o3p.cancellation.buyer_rate` | buyer_responsible_post_shipment_cancelled_postings | eligible_business_postings |
+| `o3p.cancellation.seller_responsible_rate` | seller_responsible_post_shipment_cancelled_postings | eligible_business_postings |
+| `o3p.cancellation.unit_rate` | post_shipment_cancelled_units | eligible_ordered_units |
+| `o3p.cancellation.stage_coverage` | cancelled_postings_with_verified_stage | all_cancelled_postings_requiring_stage_classification |
+| `ozon.reference.shipment_delay_rate_14d` | shipments_delayed_due_to_seller | shipments_that_should_have_been_handed_over |
+| `o3p.return.request_rate` | return_requested_units | delivered_units_in_eligible_cohort |
+| `o3p.product.return_rate` | completed_customer_return_units_as_of | delivered_units_in_cohort |
+| `o3p.return.reason_share` | returned_units_for_reason | all_returned_units |
+| `ozon.reference.buyout_rate_last_50_orders` | order_count - return_count - cancellation_count | order_count |
+| `o3p.product.buyout_rate` | buyout_success_units_as_of | buyout_eligible_units |
+| `o3p.product.non_buyout_rate` | eligible_non_buyout_units_as_of | buyout_eligible_units |
+| `o3p.whd.resale_rate` | units_resold_from_whd | units_entered_whd |
 
-```text
-BUYOUT_ELIGIBLE_COHORT
-```
 
-分母：
+## 12.2 Window
 
-```text
-buyout_eligible_units
-```
 
-分子：
+| metric_code | window |
+|---|---|
+| `o3p.inventory.calendar_ads_units` | Explicit query window; current supported examples include 7 / 14 / 28 / 56 days; no global default is frozen |
+| `o3p.inventory.adjusted_ads_units` | Explicit query window; current supported examples include 7 / 14 / 28 / 56 days; no global default is frozen |
+| `ozon.reference.product_availability` | Current Ozon reference primarily describes a 28-day observation; re-review when official rule changes |
+| `o3p.inventory.availability_rate` | Explicit observation period |
+| `o3p.inventory.lost_sales_estimate` | Explicit observation window; data-gap days excluded |
+| `ozon.reference.cancellation_rate_7d_count` | 7 days |
+| `ozon.reference.cancellation_rate_7d_value` | 7 days |
+| `ozon.reference.shipment_delay_rate_14d` | 14 days; current official reference excludes the current day |
+| `ozon.reference.buyout_rate_last_50_orders` | Latest up to 50 eligible orders; order-count window rather than fixed calendar days |
 
-```text
-buyout_eligible_units
-- post_shipment_cancelled_or_unclaimed_units
-- completed_customer_return_units_as_of
-```
 
-公式：
+## 12.3 Exclusions
 
-```text
-buyout_success_units_as_of
-/
-buyout_eligible_units
-```
 
-其中：
+| metric_code | exclusions |
+|---|---|
+| `o3p.inventory.adjusted_ads_units` | Days without reliable availability coverage are not silently treated as out-of-stock/available |
+| `o3p.inventory.lost_sales_estimate` | Exclude source coverage gaps and incompatible currencies |
+| `o3p.product.return_rate` | Exclude pre-shipment cancellation, unclaimed items, rejected-only requests, unmatched reverse records, WHD resale itself; deduplicate each sold unit |
+| `o3p.product.buyout_rate` | Exclude pre-shipment cancellations; do not double-count post-shipment non-buyout and completed returns |
+| `o3p.product.non_buyout_rate` | Pre-shipment cancellation is not Non-buyout |
+| `o3p.whd.resale_rate` | Do not infer Return → WHD → Resale link from SKU equality alone |
+| `o3p.whd.recovery_revenue` | Do not infer Return → WHD → Resale link from SKU equality alone |
 
-```text
-buyout_success_units_as_of
-=
-buyout_eligible_units
-- eligible_post_shipment_non_buyout_units
-- completed_customer_return_units_as_of
-```
 
-要求：
+## 12.4 Coverage
 
-- 同一实物不能因多个逆向物流阶段重复扣减；
-- 发货前取消不进入分母；
-- 无法区分未认购、发货后取消、客户退货时标记 `PARTIAL`；
-- Recent Cohort 可以保持 `OPEN_COHORT`。
 
-属于：
+| metric_code | coverage |
+|---|---|
+| `o3p.inventory.adjusted_ads_units` | Inventory-day availability coverage must be reliable for the selected window |
+| `o3p.inventory.availability_rate` | Missing inventory observations are excluded rather than classified as out-of-stock |
+| `o3p.inventory.lost_sales_estimate` | Source sales and availability coverage must support the full selected window |
+| `o3p.cancellation.stage_coverage` | Unknown cancellation stage remains unknown; affected downstream cancellation metrics become PARTIAL |
+| `o3p.product.return_rate` | Return-to-original-sale linkage coverage determines VALID/PARTIAL semantics |
+| `o3p.product.buyout_rate` | Lifecycle classification coverage determines VALID/PARTIAL semantics |
+| `o3p.whd.resale_rate` | Requires reliable reverse_logistics_link; otherwise result is UNVERIFIED |
+| `o3p.whd.recovery_revenue` | Requires reliable reverse_logistics_link; otherwise result is UNVERIFIED |
 
-```text
-O3P_DERIVED
-```
-
-与 Ozon 最近 50 个订单官方 Reference 分开。
-
----
-
-# 50. Non-buyout Rate
-
-```text
-o3p.product.non_buyout_rate
-=
-1 - o3p.product.buyout_rate
-```
-
-分母同样是：
-
-```text
-buyout_eligible_units
-```
-
-可展示组成：
-
-```text
-post_shipment_cancellation_component
-unclaimed_component
-return_component
-```
-
-发货前取消不属于 Non-buyout。
-
-它属于独立：
-
-```text
-pre_shipment_cancellation
-```
 
 ---
 
-# 51. WHD 指标
+# 13. Data Quality、Observability 与 Reconciliation 边界
 
-只有在 `reverse_logistics_link` 可靠匹配时才计算。
+## 13.1 保留的用户面向质量 Metric
 
-## WHD Resale Rate
-
-```text
-o3p.whd.resale_rate
-=
-units_resold_from_whd
-/
-units_entered_whd
-```
-
-## WHD Recovery Revenue
-
-```text
-o3p.whd.recovery_revenue
-=
-recognized_revenue_from_linked_whd_resales
-```
-
-如果无法可靠建立：
-
-```text
-Return → WHD → Resale
-```
-
-状态：
-
-```text
-UNVERIFIED
-```
-
-不能按相同 SKU 猜测关联。
-
----
-
-# 52. Finance 基础规则
-
-Finance 原始金额保持 Signed Money。
-
-例如：
-
-```text
-收入 / Credit
-→ positive
-
-费用 / Debit
-→ negative
-```
-
-如果某接口实际符号不同，以 Source Fact 为准。
-
-Metric Layer 可以生成 Positive Cost View，但必须与 Raw Signed Amount 分开。
-
----
-
-# 53. Finance Net Accrual
-
-```text
-metric_code:
-o3p.finance.net_accrual
-```
-
-公式：
-
-```text
-SUM(finance_accrual.total_amount)
-```
-
-按：
-
-```text
-ACCRUAL_DATE
-```
-
-统计。
-
-这是 Ozon 财务净应计视图。
-
----
-
-# 54. Finance Gross Sales
-
-当前已完成全账期实测验证：
-
-```text
-metric_code:
-o3p.finance.gross_sales
-```
-
-公式：
-
-```text
-SUM(
-    Type69.seller_price.amount
-    *
-    Type69.quantity
-)
-```
-
-当前实测中：
-
-```text
-Type 69 = SaleCommission
-```
-
-且该公式能够精确重建旧 Finance `accruals_for_sale`。
-
-要求：
-
-- seller_price 非空；
-- quantity 非空；
-- Currency 相同或转换。
-
-该指标属于：
-
-```text
-O3P_DERIVED_FROM_VERIFIED_FINANCE
-```
-
-在 Metric Origin 中归 `O3P_DERIVED`。
-
----
-
-# 55. Finance Commission Cost
-
-```text
-o3p.finance.sale_commission_cost
-=
-- SUM(Type69 accrued signed amount)
-```
-
-如果某期存在正向冲销：
-
-应参与 Net Sum。
-
-因此最终 Cost 可以降低，甚至在极端情况下为负。
-
-不能简单：
-
-```text
-SUM(ABS(each row))
-```
-
----
-
-# 56. Finance 已验证费用组
-
-当前新旧 Finance 全账期对账已经验证以下聚合关系。
-
-## Processing & Delivery
-
-```text
-Type 67
-+ Type 32
-+ Type 29
-+ Type 98
-```
-
-## Refunds & Cancellations
-
-```text
-Type 59
-+ Type 45
-```
-
-## Services
-
-当前已验证样本：
-
-```text
-Type 66
-+ Type 41
-+ Type 52
-+ Type 54
-+ Type 15
-```
-
-## Money Transfer
-
-当前样本：
-
-```text
-Type 10
-```
-
-## Acquiring
-
-```text
-Type 1
-```
-
-这些映射必须带：
-
-```text
-finance_classification_version
-```
-
-`compensation_amount` 的非零新版映射当前仍未验证。
-
----
-
-# 57. Finance Fee Ratio
-
-```text
-o3p.finance.fee_ratio
-=
-net_ozon_cost
-/
-finance_gross_sales
-```
-
-其中：
-
-```text
-net_ozon_cost
-```
-
-只包含明确分类为 Cost 的 Finance Component。
-
-若大量 Finance Amount 仍未分类：
-
-```text
-status = PARTIAL
-```
-
----
-
-# 58. Finance Unclassified Ratio
-
-```text
-o3p.finance.unclassified_amount_ratio
-=
-ABS(unclassified_finance_amount)
-/
-SUM(ABS(all_finance_amount))
-```
-
-用于检测 Finance Classification 是否足以支持 Profit。
-
----
-
-# 59. Settlement 与 Payout
-
-以下指标只有在导入对应官方财务报告后才可用。
-
-```text
-ozon.report.payout_amount
-ozon.report.planned_payment_date
-ozon.report.actual_payment_date
-ozon.report.withheld_amount
-```
-
-Finance Accrual 不得推断“已付款”。
-
----
-
-# 60. Payout Reconciliation Difference
-
-只有在 Settlement Period 已明确建立：
-
-```text
-Accrual
-↔ Settlement
-↔ Payout
-```
-
-映射后才能计算。
-
-```text
-o3p.finance.payout_reconciliation_difference
-=
-actual_payout
--
-expected_payout_under_reconciliation_contract
-```
-
-`expected_payout` 不在 v1.0 中用简单：
-
-```text
-SUM(all accrual)
-```
-
-硬编码。
-
-需要具体结算报告 Contract。
-
----
-
-# 61. Profit 的两种时间视图
-
-O3Pilot 必须区分：
-
-```text
-ACCRUAL_PERIOD
-ORDER_COHORT
-```
-
----
-
-## 61.1 Accrual Period Profit
-
-回答：
-
-> 这个财务期间 Ozon 实际记了多少钱，再扣除卖家外部成本后剩多少？
-
-Accrual Period Profit **不应用“排除发货前取消”的销售 Cohort 规则**。
-
-原因：
-
-发货前取消订单仍可能真实产生：
-
-- Ozon 取消费用；
-- 服务费；
-- 卖家物流 / 包装成本；
-- 其他真实经营成本。
-
-这些已经发生的 Money Fact 必须保留在财务期间利润中。
-
----
-
-
-## 61.2 Order Cohort Profit
-
-回答：
-
-> 某批有效订单截至当前最终贡献了多少利润？
-
-默认订单集合：
-
-```text
-eligible_business_posting
-```
-
-即排除已确认发货前取消，但保留待发货未取消订单。
-
-对于仍未完成履约或 Finance 尚未充分产生的订单：
-
-```text
-status = OPEN_COHORT / PARTIAL
-```
-
-发货前取消订单不进入 Sales Order Contribution Profit。
-
-它们产生的真实费用单独归入：
-
-```text
-Pre-shipment Cancellation Financial Impact
-```
-
-并继续进入 Shop / Accrual Period Profit。
-
-订单创建后发生的：
-
-- 后续 Finance；
-- 退货；
-- 逆向物流；
-- 赔偿；
-
-应在 As-of 计算中归回原订单。
-
-两个 Profit 不能混成同一个数字。
-
----
-
-## 61.3 Pre-shipment Cancellation Financial Impact
-
-发货前取消订单虽然不进入销售经营 Cohort，但其真实成本不能消失。
-
-```text
-metric_code:
-o3p.profit.pre_shipment_cancellation_financial_impact
-```
-
-包括已经可靠归属于发货前取消订单的：
-
-- Ozon Finance 取消 / 服务费用；
-- 已发生 Seller Logistics Cost；
-- 已发生 Packaging / Handling Cost；
-- 其他实际外部成本；
-- Compensation / Credit。
-
-计算仍遵循：
-
-```text
-Actual Money Fact First
-```
-
-该指标用于回答：
-
-> 发货前取消实际造成了多少经营损失？
-
-它不属于 Sales Revenue，也不把发货前取消订单重新放回 `eligible_business_posting`。
-
----
-
-# 62. 卖家采购成本
-
-## 62.1 Actual Procurement Cost
-
-优先：
-
-```text
-order_item_cost.transaction_cost_amount
-```
-
-Cost Source：
-
-```text
-ACTUAL_ORDER_ITEM_COST
-```
-
----
-
-## 62.2 Cost Fallback
-
-如果历史订单缺少实际成本：
-
-优先级可按 Policy：
-
-```text
-1. ACTUAL_ORDER_ITEM_COST
-2. SKU_COST_AT_ORDER_TIME
-3. CURRENT_SKU_COST
-4. MISSING
-```
-
-任何使用第 2 / 3 类的结果：
-
-```text
-status = ESTIMATED
-```
-
----
-
-# 63. Procurement Cost Coverage
-
-```text
-o3p.profit.procurement_cost_coverage
-=
-units_with_actual_order_item_cost
-/
-eligible_business_ordered_units
-```
-
-建议 Profit 页面始终展示。
-
----
-
-# 64. Seller Logistics Cost
-
-```text
-o3p.cost.seller_logistics
-=
-SUM(seller_logistics_charge.amount)
-```
-
-按 Seller-owned 原始账单 Currency 处理。
-
-它不等于 Ozon Finance 中的物流费用。
-
----
-
-# 65. Seller Logistics Coverage
-
-```text
-o3p.profit.seller_logistics_coverage
-=
-eligible_postings_with_mapped_seller_logistics_cost
-/
-eligible_postings_requiring_seller_logistics_cost
-```
-
-如果物流商导入只能到 Posting：
-
-不能假装 SKU Cost Coverage 为 100%。
-
----
-
-# 66. Profit Cost Convention
-
-Metric Layer 的成本统一使用正数 Magnitude：
-
-```text
-procurement_cost = positive
-seller_logistics_cost = positive
-ozon_fee_cost = positive
-ad_cost = positive
-```
-
-Raw Finance 仍保持 Signed Amount。
-
----
-
-# 67. Shop Net Operating Profit
-
-```text
-metric_code:
-o3p.profit.shop_net_operating_profit
-```
-
-Accrual Period 版本：
-
-```text
-finance_net_accrual
--
-procurement_cost_of_recognized_sales
--
-seller_logistics_cost
--
-packaging_cost
--
-other_external_seller_cost
-```
-
-重要：
-
-`finance_net_accrual` 已经包含 Ozon Finance 中的：
-
-- 佣金；
-- 物流费用；
-- 广告费用；
-- 订阅；
-- 收单；
-- 其他平台应计；
-
-因此不得再把同一笔 Finance Expense 重复扣除。
-
----
-
-# 68. Order / SKU Contribution Profit
-
-订单或 SKU 层使用：
-
-```text
-recognized_gross_sales
-+ allocated_finance_credits
-- attributable_ozon_finance_cost
-- procurement_cost
-- seller_logistics_cost
-- packaging_cost
-- other_attributable_external_cost
-```
-
-Posting 级 Finance 需要先通过：
-
-```text
-finance_allocation
-```
-
-分摊。
-
-如果费用无法可靠分摊：
-
-Profit Result：
-
-```text
-PARTIAL
-```
-
-而不是把费用忽略后展示成完整利润。
-
----
-
-# 69. 广告费用在 Profit 中的去重
-
-Performance Advertising 与 Finance Advertising 必须遵守：
-
-```text
-Finance = Booked Monetary Truth
-Performance = Attribution Truth
-```
-
-如果 Finance 已经包含广告扣费：
-
-Performance `moneySpent` 不得再次作为额外成本扣除。
-
-推荐方式：
-
-```text
-Finance Advertising Cost
-↓
-使用 Performance 数据作为分摊权重
-↓
-Campaign / SKU Advertising Cost Allocation
-```
-
-如果 Finance 广告费用暂时不可用，而使用 Performance Spend：
-
-```text
-cost_source = PERFORMANCE_ESTIMATE
-status = ESTIMATED
-```
-
----
-
-# 70. Profit Margin
-
-## Shop Net Profit Margin
-
-```text
-o3p.profit.net_margin
-=
-shop_net_operating_profit
-/
-finance_gross_sales
-```
-
----
-
-## Contribution Margin
-
-```text
-o3p.profit.contribution_margin
-=
-contribution_profit
-/
-recognized_gross_sales
-```
-
-Denominator <= 0：
-
-```text
-NO_DENOMINATOR
-```
-
----
-
-# 71. Profit per Unit
-
-```text
-o3p.profit.per_unit
-=
-contribution_profit
-/
-recognized_eligible_ordered_units
-```
-
----
-
-# 72. Profit Coverage
-
-Profit 不使用单一“可信度分数”。
-
-必须展示独立 Coverage：
-
-```text
-finance_coverage
-procurement_cost_coverage
-seller_logistics_coverage
-finance_allocation_coverage
-fx_coverage
-product_mapping_coverage
-```
-
-这样用户知道 Profit 缺的是哪一部分。
-
----
-
-# 73. Minimum Profitable Price
-
-价格建议属于 Decision Metric。
-
-不能用一个永久简化公式处理所有佣金和费率。
-
-定义：
-
-```text
-o3p.price.minimum_profitable_price
-=
-minimum price P
-such that
-scenario_profit(P) >= target_profit
-```
-
-Scenario Engine 必须使用：
-
-- 对应履约模式；
-- 佣金；
-- Ozon Costs；
-- Seller Costs；
-- FX；
-- Target Margin / Profit。
-
-属于：
-
-```text
-O3P_ESTIMATE
-```
-
-除非所有输入均为确定性 Contract。
-
----
-
-# 74. Advertising Source Metrics
-
-Performance API 以下属于 `OZON_SOURCE`：
-
-```text
-ozon.ads.views
-ozon.ads.clicks
-ozon.ads.spend
-ozon.ads.orders
-ozon.ads.orders_money
-ozon.ads.to_cart
-ozon.ads.ctr_raw
-ozon.ads.cpc_raw
-ozon.ads.drr_raw
-```
-
-Campaign List Budget 与 Statistics Money 使用不同 Scale Contract。
-
-不得统一 `/ 1,000,000`。
-
----
-
-# 75. Advertising CTR
-
-审计计算：
-
-```text
-o3p.ads.ctr
-=
-clicks
-/
-views
-```
-
-展示百分比。
-
-用于：
-
-- 与 `ctr_raw` 核验；
-- 聚合多个 Campaign 时重新计算。
-
-禁止直接平均 Campaign CTR。
-
----
-
-# 76. Advertising CPC
-
-```text
-o3p.ads.cpc
-=
-spend
-/
-clicks
-```
-
-Currency：
-
-Performance Stats 当前实测为 RUB。
-
-实现仍保存实际 Currency Contract。
-
----
-
-# 77. Advertising DRR
-
-```text
-o3p.ads.drr
-=
-spend
-/
-orders_money
-```
-
-展示百分比。
-
-当前实测样本：
-
-```text
-6878.41 / 64671 ≈ 10.6%
-```
-
-与 Performance Raw DRR 一致。
-
-DRR 是广告消耗占广告归因订单金额的比例。
-
----
-
-# 78. Advertising ROAS
-
-```text
-o3p.ads.roas
-=
-orders_money
-/
-spend
-```
-
-与 DRR 是倒数关系：
-
-```text
-ROAS = 1 / DRR
-```
-
-仅在 DRR 使用 Ratio 形式时成立。
-
----
-
-# 79. Ad Order Conversion
-
-```text
-o3p.ads.click_to_order_rate
-=
-orders
-/
-clicks
-```
-
----
-
-# 80. Ad Cart Rate
-
-```text
-o3p.ads.click_to_cart_rate
-=
-to_cart
-/
-clicks
-```
-
----
-
-# 81. Ad Revenue Share
-
-```text
-o3p.ads.attributed_revenue_share
-=
-performance_orders_money
-/
-total_sales_same_period_reporting_currency
-```
-
-用途：
-
-衡量销售对广告归因的依赖程度。
-
-Performance `orders_money` 是广告归因金额。
-
-不能把它当成全店 Sales。
-
----
-
-# 82. Ad Spend Share
-
-```text
-o3p.ads.spend_share_total_sales
-=
-performance_spend
-/
-total_sales_same_period_reporting_currency
-```
-
-这是经营分析 Ratio。
-
-不是新的费用。
-
-不能因为计算了 Spend Share，就在 Profit 再次扣广告费用。
-
----
-
-# 83. Campaign Budget Utilization
-
-仅当统计 Period 与预算 Period 可以严格匹配时：
-
-```text
-o3p.ads.budget_utilization
-=
-spend_in_budget_period
-/
-effective_budget
-```
-
-如果 Campaign 使用 Weekly Budget：
-
-必须按 Campaign 自身：
-
-```text
-startWeekDay
-endWeekDay
-```
-
-确定周期。
-
-不能拿任意 7 天窗口除以 Weekly Budget。
-
----
-
-# 84. Campaign 数据异常
-
-单次：
-
-```text
-Campaign List = []
-```
-
-不构成 Metric：
-
-```text
-campaign_count = 0
-```
-
-如果历史已有大量 Campaign，应：
-
-```text
-metric_status = UNVERIFIED
-```
-
-等待重采样。
-
----
-
-# 85. Questions
-
-# 85.1 Question Count
-
-```text
-o3p.voc.question_count
-=
-COUNT(question)
-```
-
----
-
-# 85.2 Answered Question Rate
-
-```text
-o3p.voc.question_answer_rate
-=
-questions_with_at_least_one_answer
-/
-eligible_questions
-```
-
----
-
-# 85.3 First Response Time
-
-```text
-o3p.voc.first_answer_duration
-=
-first_answer.published_at
--
-question.created_at_source
-```
-
-提供：
-
-```text
-P50
-P90
-Average
-Sample Count
-```
-
----
-
-# 85.4 Unanswered Aging
-
-当前仍未回答的问题：
-
-```text
-o3p.voc.unanswered_age
-=
-as_of_time
--
-question.created_at_source
-```
-
----
-
-# 86. Reviews
-
-Review 当前属于：
-
-```text
-ACCESS_DEPENDENT
-```
-
-在权限不可用时：
-
-```text
-review metrics = UNAVAILABLE
-```
-
-不得通过 Seller Info 的店铺平均商品评分反推出 Review Count。
-
----
-
-# 87. Shop Rating
-
-以下属于 `OZON_SOURCE`：
-
-```text
-ozon.rating.current_value
-ozon.rating.history_value
-ozon.rating.status_danger
-ozon.rating.status_warning
-ozon.rating.status_premium
-```
-
-O3Pilot 不重新定义 Ozon Threshold。
-
----
-
-# 88. Seller Info Rating Snapshot
-
-例如：
-
-```text
-rating_review_avg_score_total
-rating_shipment_delay_cb
-rating_price_green
-rating_price_yellow
-rating_price_red
-```
-
-都作为 Source Metric 保存。
-
-即使 O3Pilot 自己能计算类似指标：
-
-也不能覆盖官方值。
-
----
-
-# 89. Price Zone Share
-
-若 Seller Info 返回：
-
-```text
-green
-yellow
-red
-super
-```
-
-各区占比，则直接保存 Source。
-
-O3Pilot 可以计算变化：
-
-```text
-latest_share - previous_share
-```
-
-但不重新定义 Ozon Color Index 分类规则。
-
----
-
-# 90. FBS Error Index
-
-```text
-ozon.rating.fbs_error_index
-```
-
-属于 Source Metric。
-
-Error Posting 当前缺少非空真实样本时：
-
-相关明细原因指标：
-
-```text
-UNVERIFIED
-```
-
----
-
-# 91. Multi-shop 聚合
-
-只有已明确映射到同一个：
-
-```text
-seller_catalog_item
-```
-
-的 Product 才能做跨店商品聚合。
-
----
-
-# 92. Cross-shop Units
-
-```text
-o3p.catalog.total_ordered_units
-=
-SUM(eligible_ordered_units across mapped products)
-```
-
-单位必须一致。
-
----
-
-# 93. Cross-shop Revenue
-
-O3Pilot 默认跨店销售收入使用已映射商品中排除发货前取消后的 Order Gross Value。
-
-先统一 Reporting Currency：
-
-```text
-o3p.catalog.total_revenue
-=
-SUM(converted order_gross_value from eligible_business_postings)
-```
-
-如果展示：
-
-```text
-Ozon Analytics Revenue
-Finance Gross Sales
-```
-
-必须使用独立 Metric Code，不得与本指标混合。
-
-必须保存：
-
-```text
-fx_coverage
-```
-
----
-
-# 94. Cross-shop Return Rate
-
-禁止：
-
-```text
-AVG(shop_return_rate)
-```
-
-正确：
-
-```text
-SUM(returned_units)
-/
-SUM(delivered_units)
-```
-
-仅包括完成 Seller Catalog Mapping 的商品。
-
----
-
-# 95. 数据新鲜度
-
-# 95.1 Fetch Age
-
-```text
-o3p.data.fetch_age
-=
-now
--
-last_successful_fetch_at
-```
-
----
-
-# 95.2 Coverage Lag
+当前 Core Registry 只保留：
 
 ```text
 o3p.data.coverage_lag
-=
-now
--
-latest_source_business_time
+o3p.data.mapping_coverage
 ```
 
-适用于：
-
-- Analytics；
-- Performance；
-- Finance；
-- Search。
-
-Fetch Age 与 Coverage Lag 不得混用。
+它们直接影响用户解释业务数据是否覆盖到正确时间或对象。
 
 ---
 
-# 96. 数据完整度
+## 13.2 Completeness 是 Invariant，不是通用 Metric
 
-通用：
+旧：
 
 ```text
 o3p.data.completeness
-=
-usable_expected_records
-/
-expected_records
 ```
 
-`expected_records` 必须有来源 Contract。
+不再作为一个全系统通用 Business Metric。
 
-如果无法定义 Expected：
+正式规则：
 
-不能伪造一个完整度百分比。
+> 只有存在权威 Expected Population 时，才允许计算 Completeness Ratio。
+
+没有权威 Expected 时：
+
+```text
+不得伪造 completeness %
+```
+
+具体 Domain 若未来存在真实 Expected Contract，可建立该 Domain 自己的正式 Metric。
 
 ---
 
-# 97. Mapping Coverage
+## 13.3 Pipeline Telemetry 不进入 Business Metric Registry
+
+以下旧 Metric Code 不再属于 Business Metric Contract：
 
 ```text
-o3p.data.mapping_coverage
-=
-matched_records
-/
-eligible_records
-```
-
-适用于：
-
-- ERP → Posting Item；
-- Logistics → Posting / Package；
-- Finance → Posting；
-- Seller Catalog Mapping。
-
----
-
-# 98. Reconciliation Match Rate
-
-```text
-o3p.data.reconciliation_match_rate
-=
-matched_comparable_fields
-/
-all_comparable_fields
-```
-
-或按 Record：
-
-```text
-matched_records
-/
-compared_records
-```
-
-必须在 Metric Variant 中说明。
-
----
-
-# 99. Duplicate Rate
-
-```text
+o3p.data.fetch_age
 o3p.data.duplicate_rate
-=
-duplicate_source_objects
-/
-received_source_objects
-```
-
-同一幂等重采集不应被算成业务重复。
-
----
-
-# 100. Sync Gap
-
-同步缺口不建议压缩成单一百分比。
-
-至少保存：
-
-```text
-gap_start
-gap_end
-source
-domain
-```
-
-可生成：
-
-```text
 o3p.data.gap_duration
 ```
 
----
-
-# 101. Forecast 基本定义
-
-Forecast 必须有：
+职责 Authority：
 
 ```text
-forecast_origin_date
-target_start
-target_end
-horizon_days
-model_version
+ARCHITECTURE.md §27 Observability
 ```
 
-实际值出现后才能回测。
-
----
-
-# 102. Forecast Demand
+时间语义：
 
 ```text
-o3p.forecast.demand_units
+ARCHITECTURE.md §7.4 Time Semantics
 ```
 
-表示：
+底层事实来自当前：
 
-```text
-预测目标区间内的实际可履约需求件数
-```
+- `raw_capture`；
+- `sync_run`；
+- `data_quality_issue`。
 
-O3Pilot 默认 Forecast Target：
-
-```text
-actual = eligible_ordered_units
-```
-
-即：
-
-```text
-所有创建订单件数
-- 已确认发货前取消件数
-```
-
-待发货但未取消订单继续进入 Forecast Actual；近期窗口可以是 `OPEN_COHORT`，如果订单之后在发货前取消，回测 Actual 应随最终事实修订。
-
-如果未来需要预测“原始下单需求”，必须使用独立 Forecast Variant：
-
-```text
-forecast_target = CREATED_ORDER_DEMAND
-```
-
-不能与默认库存消耗 / 补货预测混用。
-
-不能与：
-
-```text
-recommended_replenishment_units
-```
-
-混为一个值。
+如果 Observability UI 需要 Freshness、Duplicate Rate 或 Gap Duration，可按这些事实计算诊断值；不得反过来宣称 `data_quality_issue` 已经一对一持久保存这些聚合值。
 
 ---
 
-# 103. Forecast Error
+## 13.4 Reconciliation Match 是 Diagnostic
 
-定义：
+旧：
 
 ```text
-error = forecast - actual
-absolute_error = ABS(forecast - actual)
+o3p.data.reconciliation_match_rate
 ```
 
-解释：
+不再作为 Core Business Metric。
+
+对账仍允许计算：
 
 ```text
-error > 0
-→ 高估
-
-error < 0
-→ 低估
-```
-
----
-
-# 104. MAE
-
-```text
-o3p.forecast.mae
-=
-AVG(ABS(forecast - actual))
-```
-
-单位：
-
-```text
-pcs
-```
-
-直观，但跨 SKU 汇总时不考虑规模差异。
-
----
-
-# 105. RMSE
-
-```text
-o3p.forecast.rmse
-=
-SQRT(
-    AVG(
-        (forecast - actual)^2
-    )
-)
-```
-
-更强调大误差。
-
----
-
-# 106. WAPE
-
-O3Pilot Forecast Backtest 的主要总体误差指标。
-
-```text
-o3p.forecast.wape
-=
-SUM(ABS(forecast - actual))
+matched
 /
-SUM(actual)
+comparable
 ```
 
-如果：
+但属于 Reconciliation Diagnostic。
 
-```text
-SUM(actual) = 0
-```
-
-返回：
-
-```text
-NO_DENOMINATOR
-```
-
-WAPE 比简单 MAPE 更适合存在低销量 / 0 销量 SKU 的组合评估。
-
----
-
-# 107. Forecast Bias
-
-```text
-o3p.forecast.bias
-=
-SUM(forecast - actual)
-/
-SUM(actual)
-```
-
-解释：
-
-```text
-> 0
-→ 系统整体高估需求
-
-< 0
-→ 系统整体低估需求
-```
-
----
-
-# 108. MAPE
-
-仅作为辅助：
-
-```text
-o3p.forecast.mape_nonzero
-=
-AVG(
-    ABS(forecast - actual)
-    /
-    actual
-)
-WHERE actual > 0
-```
-
-必须明确：
-
-```text
-nonzero actual only
-```
-
-不能把 0 Actual 样本静默删除而仍称“全部 SKU MAPE”。
-
----
-
-# 109. Forecast Accuracy Score
-
-如果 UI 需要一个“准确率”百分比，可派生：
-
-```text
-o3p.forecast.accuracy_score
-=
-MAX(0, 1 - WAPE)
-```
-
-展示：
-
-```text
-0% ~ 100%
-```
-
-但正式分析仍应同时展示：
-
-```text
-WAPE
-Bias
-MAE
-```
-
-因为 Accuracy Score 会把所有 `WAPE > 100%` 压成 0%。
-
----
-
-# 110. Forecast Backtest Grain
-
-回测必须按：
-
-```text
-SKU + Forecast Origin + Horizon
-```
-
-保存。
-
-不能只保存某个月一个“总体准确率”。
-
----
-
-# 111. Horizon-specific Accuracy
-
-必须分开：
-
-```text
-7-day
-14-day
-30-day
-60-day
-```
-
-或其他 Forecast Horizon。
-
-禁止把不同 Horizon 的预测误差混成一个 WAPE。
-
----
-
-# 112. Forecast Coverage
-
-```text
-o3p.forecast.coverage
-=
-forecasted_eligible_skus
-/
-all_eligible_skus
-```
-
-如果只对畅销 SKU 预测：
-
-总体 Accuracy 不能宣称覆盖全商品。
-
----
-
-# 113. Stockout Projection
-
-```text
-o3p.forecast.projected_stockout_date
-```
-
-根据：
-
-- 当前 sellable stock；
-- eligible in-transit；
-- Forecast Demand；
-
-模拟未来库存路径。
-
-属于：
-
-```text
-O3P_FORECAST
-```
-
----
-
-# 114. Projected Days of Cover
-
-```text
-o3p.forecast.projected_days_of_cover
-```
-
-与当前：
-
-```text
-o3p.inventory.days_of_cover
-```
-
-分开。
-
-前者使用 Forecast。
-
-后者使用近期销售速度。
-
----
-
-# 115. Recommendation Priority
-
-Recommendation 不是原始 Metric。
-
-可根据多个 Metric 生成 Priority。
-
-例如补货建议可以考虑：
-
-- projected stockout；
-- days of cover；
-- lost sales estimate；
-- lead time；
-- in-transit stock；
-- forecast error；
-- profit contribution。
-
-Priority 算法属于 Recommendation Model，并必须版本化。
-
----
-
-# 116. Alert Metric Rule
-
-Alert 不应重新实现业务公式。
-
-Alert 结构：
-
-```text
-Metric
-+
-Threshold
-+
-Window
-+
-Rule Version
-```
-
-例如：
-
-```text
-metric = o3p.inventory.days_of_cover
-condition = < 10
-```
-
-该 10 天是 Alert Policy，不是 Metric Definition。
-
----
-
-# 117. 异常变化指标
-
-基础变化：
-
-```text
-delta
-=
-current - baseline
-```
-
-```text
-delta_rate
-=
-(current - baseline)
-/
-abs(baseline)
-```
-
-“异常”本身还需要：
-
-- Threshold；
-- Seasonality；
-- Sample Size；
-- Model；
-
-因此 `METRICS.md` 不把一个简单 `-20%` 永久定义成“异常”。
-
----
-
-# 118. 指标状态优先级
-
-当同一个 Metric 同时存在多个风险时，建议状态优先级：
-
-```text
-UNAVAILABLE
-UNVERIFIED
-STALE
-PARTIAL
-ESTIMATED
-OPEN_COHORT
-VALID
-```
-
-例如：
-
-数据只覆盖一半且又使用成本 Fallback：
-
-主状态：
-
-```text
-PARTIAL
-```
-
-同时可以保存：
-
-```text
-estimate_flag = true
-```
-
----
-
-# 119. 指标展示最小上下文
-
-任何 Ratio 至少展示：
-
-```text
-value
-numerator
-denominator
-period
-status
-```
-
-任何 P50 / P90 至少展示：
-
-```text
-value
-sample_count
-period
-status
-```
-
-任何 Money 至少展示：
-
-```text
-amount
-currency
-period
-```
-
-跨币种 Money：
-
-还应能查看：
-
-```text
-reporting_currency
-fx_policy
-```
-
----
-
-# 120. Source Metric 与 Derived Metric 对账
-
-对于能够双算的指标，O3Pilot 应允许：
+能够双算的 Source / Derived 可以展示：
 
 ```text
 Source Value
@@ -4483,21 +1271,9 @@ Difference
 Difference %
 ```
 
-但 Derived 不能覆盖 Source。
+Derived 永远不能覆盖 Source。
 
-典型：
-
-- Analytics Ordered Units vs O3Pilot Shipped Units / Created Demand Units；
-- Ozon Rating vs O3Pilot Operational Rate；
-- Performance Raw CTR vs Recomputed CTR；
-- Finance Gross Sales vs Order Gross Value；
-- Official Report vs API。
-
----
-
-# 121. 指标差异状态
-
-建议：
+建议 Difference Status：
 
 ```text
 MATCH
@@ -4507,552 +1283,369 @@ NOT_COMPARABLE
 PARTIAL
 ```
 
-Money Difference 的 Tolerance 必须在 Reconciliation Contract 中定义。
-
-不能全系统共用一个固定误差。
+Money Tolerance 必须由对应 Reconciliation Context 定义，不建立一个全系统固定误差。
 
 ---
 
-# 122. 核心 Metric Registry
+# 14. Source / Reference Conflict Rules
 
-| Domain | Metric Code | Origin | Primary Grain |
-|---|---|---|---|
-| Sales | `o3p.sales.mother_order_count` | O3P_DERIVED | Shop + Period |
-| Sales | `o3p.sales.posting_count` | O3P_DERIVED | Shop + Eligible Order Cohort |
-| Demand | `o3p.demand.created_posting_count` | O3P_DERIVED | Shop + Created Cohort |
-| Demand | `o3p.demand.created_ordered_units` | O3P_DERIVED | SKU + Created Cohort |
-| Sales | `o3p.sales.ordered_units` | O3P_DERIVED | SKU + Eligible Order Cohort |
-| Sales | `o3p.sales.delivered_units` | O3P_DERIVED | SKU + Period |
-| Sales | `o3p.sales.order_gross_value` | O3P_DERIVED | SKU + Period |
-| Analytics | `ozon.analytics.revenue` | OZON_SOURCE | SKU + Day |
-| Analytics | `ozon.analytics.ordered_units` | OZON_SOURCE | SKU + Day |
-| Funnel | `o3p.funnel.view_to_cart_rate` | O3P_DERIVED | SKU + Period |
-| Search | `ozon.search.view_conversion` | OZON_SOURCE | SKU + Period |
-| Product | `ozon.product.content_rating` | OZON_SOURCE | SKU + Snapshot |
-| Price | `o3p.price.discount_rate` | O3P_DERIVED | Product + Snapshot |
-| Inventory | `o3p.inventory.sellable_stock` | O3P_DERIVED | SKU + Snapshot |
-| Inventory | `o3p.inventory.in_transit_stock` | O3P_DERIVED | SKU + Snapshot |
-| Inventory | `o3p.inventory.days_of_cover` | O3P_DERIVED | SKU + Snapshot |
-| Inventory | `o3p.inventory.availability_rate` | O3P_DERIVED | SKU + Period |
-| Inventory | `o3p.inventory.lost_sales_estimate` | O3P_ESTIMATE | SKU + Period |
-| Replenishment | `o3p.inventory.recommended_replenishment_units` | O3P_FORECAST / ESTIMATE | SKU + Run |
-| Fulfillment | `o3p.fulfillment.order_to_handover_duration` | O3P_DERIVED | Posting |
-| Fulfillment | `o3p.fulfillment.delivery_transit_duration` | O3P_DERIVED | Posting |
-| Fulfillment | `o3p.fulfillment.on_time_handover_rate` | O3P_DERIVED | Mode + Period |
-| Fulfillment | `o3p.fulfillment.promise_delivery_hit_rate` | O3P_DERIVED | Mode + Period |
-| Cancellation | `o3p.cancellation.pre_shipment_rate` | O3P_DERIVED | Shop + Created Cohort |
-| Cancellation | `o3p.cancellation.posting_rate` | O3P_DERIVED | Shop + Eligible Order Cohort |
-| Returns | `o3p.product.return_rate` | O3P_DERIVED | Product + Delivery Cohort |
-| Buyout | `ozon.reference.buyout_rate_last_50_orders` | OZON_REFERENCE | Product |
-| Buyout | `o3p.product.buyout_rate` | O3P_DERIVED | Product + Cohort |
-| Finance | `o3p.finance.net_accrual` | O3P_DERIVED | Shop + Accrual Period |
-| Finance | `o3p.finance.gross_sales` | O3P_DERIVED | Shop/SKU + Period |
-| Finance | `o3p.finance.sale_commission_cost` | O3P_DERIVED | Shop/SKU + Period |
-| Profit | `o3p.profit.shop_net_operating_profit` | O3P_DERIVED / ESTIMATE | Shop + Period |
-| Profit | `o3p.profit.net_margin` | O3P_DERIVED / ESTIMATE | Shop + Period |
-| Ads | `o3p.ads.ctr` | O3P_DERIVED | Campaign + Period |
-| Ads | `o3p.ads.cpc` | O3P_DERIVED | Campaign + Period |
-| Ads | `o3p.ads.drr` | O3P_DERIVED | Campaign + Period |
-| Ads | `o3p.ads.roas` | O3P_DERIVED | Campaign + Period |
-| VOC | `o3p.voc.question_answer_rate` | O3P_DERIVED | Shop + Period |
-| Rating | `ozon.rating.current_value` | OZON_SOURCE | Shop + Snapshot |
-| Data | `o3p.data.coverage_lag` | O3P_DERIVED | Source |
-| Data | `o3p.data.mapping_coverage` | O3P_DERIVED | Domain |
-| Forecast | `o3p.forecast.wape` | O3P_DERIVED | SKU Set + Horizon |
-| Forecast | `o3p.forecast.bias` | O3P_DERIVED | SKU Set + Horizon |
-| Forecast | `o3p.forecast.accuracy_score` | O3P_DERIVED | SKU Set + Horizon |
+Ozon 不同页面、报告或 API 的相似指标不得自动合并。
 
----
-
-# 123. Phase 0 必须实现的 Metric
-
-Data Foundation 和 Core Operations 首版至少需要：
-
-```text
-mother_order_count
-posting_count
-ordered_units
-o3p.fulfillment.shipped_units
-delivered_units
-post_shipment_cancelled_units
-
-created_posting_count
-created_ordered_units
-pre_shipment_cancellation_rate
-post_shipment_cancellation_rate
-cancellation_stage_coverage
-
-order_gross_value
-average_unit_price
-
-analytics ordered_units
-analytics revenue
-
-sellable_stock
-reserved_stock
-in_transit_stock
-
-calendar_ads_units
-adjusted_ads_units
-days_of_cover
-
-order_to_handover_duration
-delivery_transit_duration
-order_to_delivery_duration
-P50 / P90
-on_time_handover_rate
-promise_delivery_hit_rate
-
-product_return_rate
-product_buyout_rate
-
-finance_net_accrual
-finance_gross_sales
-finance_sale_commission_cost
-finance_unclassified_amount_ratio
-
-procurement_cost_coverage
-seller_logistics_coverage
-
-shop_net_operating_profit
-net_profit_margin
-profit coverage dimensions
-
-ads views
-ads clicks
-ads spend
-ads orders_money
-CTR
-CPC
-DRR
-ROAS
-
-question_count
-question_answer_rate
-
-rating source metrics
-
-data freshness
-coverage lag
-mapping coverage
-reconciliation status
-```
-
----
-
-# 124. Phase 1 / 2 扩展
-
-进一步增加：
-
-```text
-availability_rate
-lost_sales_estimate
-replenishment_estimate
-
-WHD resale metrics
-return financial impact
-
-promotion lift
-price-profit simulation
-minimum profitable price
-
-settlement / payout reconciliation
-
-campaign budget utilization
-ad revenue share
-ad spend share
-```
-
----
-
-# 125. Phase 3 / 4 扩展
-
-Decision Support：
-
-```text
-forecast demand
-forecast WAPE
-forecast Bias
-forecast MAE / RMSE
-projected stockout date
-projected days of cover
-forecast-based replenishment
-recommendation priority
-```
-
----
-
-# 126. 当前明确不定义的指标
-
-以下内容 v1.0 不建立正式 Metric Contract：
-
-- Performance Phrases ROI；
-- Phrase Conversion；
-- Review Detail 指标；
-- FBS Error Posting 原因分布；
-- Analytics Stocks Item 指标；
-- Webhook End-to-End Latency SLA；
-- WHD 精确二次销售回收率；
-- Compensation 非零场景完整 Finance Mapping；
-- 未经验证的竞争对手销量；
-- 未经验证的竞争对手库存。
-
-原因：
-
-当前 Source Contract 不足。
-
----
-
-# 127. 当前官方口径冲突处理
-
-当 Ozon 不同页面存在不同时间窗口或相关指标时：
-
-禁止自动合并。
-
-例如当前资料同时存在：
+例如：
 
 ```text
 Fulfillment Report Cancellation
-→ 最近 7 天
+→ 7-day reference
 
-Service Quality Seller-responsible Cancellation
-→ 最近 14 天，不含当天
+Service Quality Cancellation
+→ 14-day reference
 ```
 
-O3Pilot 分别建 Metric Code。
+它们拥有不同人口、时间窗和责任规则，因此保持独立。
 
-只有完成来源和分子 / 分母对账后，才能说明两者关系。
+`OZON_REFERENCE` 与 O3Pilot 自算 Metric 只有完成逐项对账后，才能说明两者是否接近；不得先宣称 100% 相同。
 
 ---
 
-# 128. Metric Version 规则
+# 15. Metric Version 与 Code Stability
 
-只要以下任一项改变：
+以下任一计算语义改变时必须提升 `metric_version`：
 
+- Formula；
 - Numerator；
 - Denominator；
 - Eligibility；
-- Exclusion；
+- Exclusions；
 - Time Basis；
-- Return Status Mapping；
-- Finance Classification；
+- Window；
+- Mapping used by the Metric；
 - FX Policy；
-- Allocation；
-- Cost Fallback；
+- Cost / fallback semantics。
 
-必须提升 `metric_version`。
+UI 名称变化不自动提升 `metric_version`。
 
-UI 名称可以不变。
+`metric_code` 一旦作为数据库或 API Contract 发布，不得因为 UI 文案修改而改变。
 
-历史 Result 必须保留旧版本。
-
----
-
-# 129. Metric Code 稳定性
-
-Metric Code 一旦作为数据库或 API Contract 发布：
-
-不得因为 UI 中文改名而改 Code。
-
-例如：
-
-```text
-o3p.product.return_rate
-```
-
-即使 UI 后来显示：
-
-```text
-商品退货率
-实际退货率
-历史退货率
-```
-
-基础 Code 仍保持稳定，通过 Variant / Dimension 表达。
+Derived Result 不得覆盖 Source Fact。
 
 ---
 
-# 130. 派生数据不可反写 Source Fact
+# 16. Deferred Metric Register
 
-禁止：
+Deferred 不等于删除 Source Acquisition，也不等于把未来完整算法继续留在 Active Baseline。
+
+只有：
 
 ```text
-O3Pilot Return Rate
-→ 覆盖 Ozon Return Metric
+DEFER_P2
+DEFER_P3
+DEFER_P4
+DEFER_LATER
 ```
 
-禁止：
+可以进入本 Register。
+
+
+| metric_code_or_group | target_phase | reason | re_entry_condition | archive_ref |
+|---|---|---|---|---|
+| Traffic Analytics source metrics (`ozon.analytics.hits_view*`, `hits_tocart*`, `session_view*`) | P3 | Growth Analytics / traffic analysis is outside v1 P0+P1 although acquisition may start earlier | P3 Growth Analytics enters delivery and DATA_MODEL/DATA_SOURCES contracts for the required traffic fields remain valid | METRICS v1.0 Drive revision history (NON-NORMATIVE) |
+| `o3p.funnel.view_to_cart_rate` | P3 | Conversion funnel is Growth Analytics | P3 Growth Analytics enters delivery with stable source coverage | METRICS v1.0 Drive revision history (NON-NORMATIVE) |
+| Search Analytics (`ozon.search.*`, `o3p.search.query_*`) | P3 | Search is P3 Metrics/Feature even when Acquisition is P0 | P3 Growth Analytics enters delivery; retained-window evidence remains sufficient for implementation | METRICS v1.0 Drive revision history (NON-NORMATIVE) |
+| Promotion Lift (former §18) | P3 | Promotion performance comparison belongs Growth Analytics | P3 Growth Analytics enters delivery and promotion participation/source coverage is authoritative | METRICS v1.0 Drive revision history (NON-NORMATIVE) |
+| Finance metrics (`o3p.finance.*`, `ozon.report.*`) | P2 | Finance & Settlement are outside v1 Feature Delivery | P2 Finance & Profit enters delivery with deferred normalized Finance model activated | METRICS v1.0 Drive revision history (NON-NORMATIVE) |
+| Profit / Cost metrics (`o3p.profit.*`, `o3p.cost.seller_logistics`, `o3p.price.minimum_profitable_price`) | P2 | Profit and cost attribution depend on P2 models and seller-owned cost inputs | P2 Finance & Profit enters delivery with cost/finance coverage rules activated | METRICS v1.0 Drive revision history (NON-NORMATIVE) |
+| Advertising source and derived metrics (`ozon.ads.*`, `o3p.ads.*`) | P3 | Advertising analytics is Growth Analytics | P3 enters delivery; advertising normalized models and historical-window evidence are active | METRICS v1.0 Drive revision history (NON-NORMATIVE) |
+| Questions / Answers metrics (`o3p.voc.*`) | P3 | VOC is P3 and Questions Acquisition/Backfillability remain TBD | P3 enters delivery and acquisition/backfillability has been verified without guessing | METRICS v1.0 Drive revision history (NON-NORMATIVE) |
+| Reviews metric family | P3 | Reviews are access-dependent P3; current List/Detail contract is not fully verified | P3 enters delivery and Review capability/list/detail evidence is verified | METRICS v1.0 Drive revision history (NON-NORMATIVE) |
+| Cross-shop catalog metrics (`o3p.catalog.total_ordered_units`, `o3p.catalog.total_revenue`, cross-shop return-rate group) | Later | Cross-shop canonical product aggregation depends on Seller Catalog Mapping | Seller Catalog Mapping re-enters with stable identity/history and PRODUCT authorizes the feature | METRICS v1.0 Drive revision history (NON-NORMATIVE) |
+| Ozon replenishment guidance reference (former §27) | P4 | Replenishment recommendation thresholds are Decision Support policy/reference | P4 Decision Support enters delivery and current Ozon reference is re-reviewed | METRICS v1.0 Drive revision history (NON-NORMATIVE) |
+| `o3p.inventory.recommended_replenishment_units` + baseline replenishment estimate group | P4 | Replenishment recommendation/forecast is Decision Support | P4 enters delivery with Forecast/Recommendation model and lead-time inputs activated | METRICS v1.0 Drive revision history (NON-NORMATIVE) |
+| Forecast metric family (`o3p.forecast.*`) | P4 | Forecast/backtest/projected stock metrics are Decision Support | P4 enters delivery; FORECASTING authority/model is defined and historical backtest inputs are available | METRICS v1.0 Drive revision history (NON-NORMATIVE) |
+
+
+完整旧算法不复制到 Deferred Appendix。历史版本通过 Drive / Git Revision History 找回，Archive Ref 永远是 NON-NORMATIVE。
+
+特别边界：
 
 ```text
-O3Pilot Profit
-→ 覆盖 Finance Accrual
+Search Analytics
+Acquisition = P0
+Metrics / Feature = P3
 ```
 
-禁止：
+因此 Search 仍在 Deferred Metric Register，但对应有限窗口数据可以提前采集。
+
+Questions / Answers：
 
 ```text
-Estimated Logistics Cost
-→ 覆盖 Seller Logistics Import
+Acquisition Phase = TBD
+Backfillability = TBD
+Metrics / Feature = P3
+```
+
+METRICS 不重新裁决 Questions / Answers 的采集机制或回补能力；这些仍属于 `DATA_SOURCES.md`。
+
+Campaign SKU Daily：
+
+```text
+Feature = P3
+```
+
+它的提前采集不允许把广告 Metric 提前变成 P0/P1 Active。
+
+---
+
+# 17. Delegated、Rule-only 与 Diagnostic Disposition
+
+以下内容不能进入 Deferred Metric Register：
+
+
+| source_item | disposition | target_phase | target_authority | reason |
+|---|---|---|---|---|
+| Recommendation Priority (former §115) | DELEGATE | — | ALERTS_AND_RECOMMENDATIONS.md | Application / Decision Support policy, not a Metric Definition |
+| Alert Metric Rule / thresholds (former §116) | DELEGATE | P1 Basic Alerts feature can consume metrics | ALERTS_AND_RECOMMENDATIONS.md | Alert threshold/window/rule lifecycle is application policy |
+| Anomaly classification / threshold / seasonality / model (former §117 tail) | DELEGATE | — | ALERTS_AND_RECOMMENDATIONS.md | Basic delta math remains in METRICS; anomaly decision policy does not |
+| `o3p.data.fetch_age` | DIAGNOSTIC_ONLY | P0 | ARCHITECTURE.md §27 Observability | Pipeline freshness diagnostic; not a business Metric Contract |
+| `o3p.data.duplicate_rate` | DIAGNOSTIC_ONLY | P0 | ARCHITECTURE.md §27 Observability + DATA_MODEL.md §4.4 | Pipeline data-quality diagnostic computed from underlying facts when needed |
+| `o3p.data.gap_duration` | DIAGNOSTIC_ONLY | P0 | ARCHITECTURE.md §27 Observability + DATA_MODEL.md §4.3/§4.4 | Sync-gap diagnostic; not a core business metric |
+| `o3p.data.reconciliation_match_rate` | DIAGNOSTIC_ONLY | P0 | METRICS Reconciliation Rules | Reconciliation diagnostic semantic; not Core Registry |
+| `o3p.data.completeness` | RULE_ONLY | P0 | METRICS Data Quality Invariants | No global percentage unless an authoritative expected population exists |
+| `o3p.sales.growth_rate` / `o3p.sales.unit_growth_rate` | RULE_ONLY | P1 | METRICS Period & Baseline Comparison | Generic comparison must not create one Metric Code with multiple underlying source meanings |
+| `o3p.fulfillment.promise_window_shift_hours` | RULE_ONLY | P1 | METRICS Schedule Comparison Rules | One old code attempted to carry from/to shifts; keep rule to compare both bounds separately rather than force a multi-value Metric Result |
+
+
+Basic Alerts 仍然属于 P1 Product Scope；这里只把 Alert Policy / Threshold Authority 从 METRICS 中剥离，不删除 Basic Alerts Feature。
+
+---
+
+# 18. Evidence Boundaries — 当前不建立正式 Metric Contract
+
+当前证据不足时，不为“看起来完整”而创建 Metric Code。
+
+至少包括：
+
+- Performance Phrase ROI / Phrase Conversion：P3 且非空历史主来源仍需验证；
+- Review Detail 指标：P3，真实 List / Detail 受权限和验证状态限制；
+- FBS Error Posting 原因分布：当前非空真实样本不足；
+- Analytics Stocks Item 指标：当前没有已冻结的 Active Metric Contract；
+- `inventory_turnover_snapshot` 的 `average_daily_sales / current_stock / inventory_days_cover / turnover_grade` 已是 P1 Source Fact，但 v1.0 没有对应 Canonical Metric Code；A.3 不凭空发明 Code，现阶段继续作为 P1 Source Fact 使用；
+- `fbs_error_defect_daily.defect_value` 已进入 P1 Data Model，但 v1.0 没有独立 Canonical Metric Code；A.3 只保留已存在的 `ozon.rating.fbs_error_index` 正式 Metric，不凭空扩展 Code；
+- Webhook End-to-End Latency SLA：属于 Observability / Service-Level 设计，不是当前业务 Metric；
+- 精确 WHD 财务回收率：没有可靠 Return → WHD → Resale + Finance 关联时不建立；
+- Compensation 非零完整 Finance Mapping：P2 再 Review；
+- 未经验证的竞争对手销量 / 库存：不定义。
+
+这类 Evidence Boundary 不得通过填充假字段、假公式或假 Source 来消除 TBD。
+
+---
+
+# 19. Formal Metric Definition Reverse Scan
+
+A.3 以后，审计不能只搜索：
+
+```text
+metric_code:
+```
+
+必须同时覆盖：
+
+1. Active / Deferred Registry；
+2. 正文全部显式 `metric_code`；
+3. 公式；
+4. Numerator / Denominator；
+5. Origin 声明；
+6. Reference Metric；
+7. Estimate / Forecast；
+8. Ratio / Rate；
+9. Metric-specific Calculation Rule；
+10. Metric-like Threshold。
+
+每一个被识别的 Formal Metric Definition / Metric-like 定义必须且只能得到一个 Disposition：
+
+```text
+ACTIVE_P0
+ACTIVE_P1
+DEFER_P2
+DEFER_P3
+DEFER_P4
+DEFER_LATER
+DELEGATE
+RULE_ONLY
+DIAGNOSTIC_ONLY
+REMOVE_DUPLICATE
+```
+
+并拥有唯一最终 `target_authority` / final location。
+
+只有 `DEFER_*` 进入 Deferred Metric Register。
+
+数学 / Eligibility 边界留在 METRICS；业务 Alert / Recommendation 触发阈值进入对应 Application Authority。
+
+---
+
+# 20. Acceptance Gates
+
+## 20.1 Layer A — Contract Gates
+
+必须全部满足：
+
+```text
+Old 17-field migration = 17 / 17 mapped
+
+Source Contract required fields = 8
+
+Derived Contract required fields = 9
+
+Active Optional Extensions:
+Batch 0 Frozen = numerator / denominator / exclusions / coverage
+A.3 Justified = window
+
+Unjustified new Contract fields = 0
+
+Canonical vocabulary violations = 0
+
+Active formal Metric without one complete SOURCE or DERIVED definition = 0
+
+Multi-origin Registry cells = 0
+
+Generic calculation_run_id requirement = 0
 ```
 
 ---
 
-# 131. 指标验收原则
+## 20.2 Layer B — Scope Gates
 
-在开发正式 Dashboard 前，Metric Engine 至少满足：
-
-1. Mother Order 与 Posting 指标分离；
-2. Source Metric 与 Derived Metric 分离；
-3. Ozon Reference Metric 单独标记；
-4. Ratio 使用分子 / 分母聚合；
-5. Denominator 0 返回 N/A；
-6. Missing 不等于 0；
-7. Money 不跨币种直接求和；
-8. 每次 FX 转换保存 Rate Basis；
-9. Analytics 与 Order Fact 不静默互相覆盖；
-10. Product Weight 不进入库存件数计算；
-11. Sellable Stock 与 Reserved 分离；
-12. Current Stock 与 In-transit 分离；
-13. Days of Cover 不在零销量时返回伪造大数；
-14. Lost Sales 明确标记 Estimate；
-15. Ozon Lost Sales Reference 与 O3Pilot Estimate 分离；
-16. Ozon 补货阈值不成为 O3Pilot 永久阈值；
-17. 发货 / 配送 Duration 使用真实节点；
-18. P50 / P90 从原始样本计算；
-19. 时效指标展示 Sample Count；
-20. 经营结果类订单指标默认先排除已确认发货前取消；
-21. 待发货但未取消订单不得因为尚未发货而从 Sales / AOV / ADS / 默认取消率 / Forecast Actual 中删除；
-22. Created Demand 与 Eligible Sales 使用不同 Metric Code；
-23. Ozon Source / Reference Metric 不被强制套用 O3Pilot 的发货前取消过滤；
-24. Finance / Settlement / Payout 保留发货前取消产生的真实 Money Fact；
-25. Ozon 取消率与 O3Pilot 取消率分离；
-26. 产品退货率使用 Cohort；
-27. 近期退货 Cohort 可以保持 OPEN；
-28. 取消、未认购、客户退货不混为一个 Return Type；
-29. Ozon 最近 50 单认购率与 O3Pilot Buyout Rate 分离；
-30. Finance v1 是新财务 Metric 基础；
-31. Type 69 Gross Sales 使用已验证公式；
-32. Finance Classification 版本化；
-33. Unclassified Finance 可量化；
-34. Profit 不重复扣除 Performance Advertising；
-35. Finance Advertising 与 Performance Attribution 分离；
-36. 历史订单优先使用实际采购成本；
-37. Profit 显示独立 Coverage，不伪造单一可信度；
-38. Settlement / Payout 不由 Accrual 猜测；
-39. Advertising CTR / CPC / DRR 聚合时重新计算；
-40. Campaign Ratio 不直接平均；
-41. Performance SKU Daily 缺采时不能用未来数据伪造；
-42. Review 无权限显示 N/A；
-43. Shop Rating 保留 Ozon Source Value；
-44. 跨店 Product 必须通过 Seller Catalog Mapping；
-45. Forecast Accuracy 按 Horizon 分开；
-46. WAPE 作为总体 Forecast 主误差；
-47. Forecast Bias 必须同时可见；
-48. 预测值、估算值、实际值明确区分；
-49. Alert 不重新定义 Metric；
-50. 所有 Metric Result 可追溯到 Metric Version 和 Source Coverage。
----
-
-# 132. 与 DATA_SOURCES.md 的关系
-
-`DATA_SOURCES.md` 定义：
+必须全部满足：
 
 ```text
-数据从哪里来
+P2/P3/P4/Later formal Metric definitions remaining in Active Body = 0
+
+Formal Metric Definition Reverse Scan unresolved entries = 0
 ```
 
-`METRICS.md` 只能使用：
+Markdown 行数不作为 Gate。
 
-- DATA_SOURCES 已验证自动来源；
-- 明确 MANUAL 来源；
-- 明确 PARTIAL 并带状态的来源。
+执行完成后只报告真实：
 
-不能为了公式完整而发明不存在的数据。
+```text
+before_lines
+after_lines
+```
+
+作为审计统计。
 
 ---
 
-# 133. 与 DATA_MODEL.md 的关系
+## 20.3 Cross-layer Gates
 
-`DATA_MODEL.md` 定义：
-
-```text
-Fact 如何保存
-```
-
-`METRICS.md` 定义：
+必须确认：
 
 ```text
-Fact 如何计算成 Metric
+Feature Phase is not redefined by METRICS
+
+Endpoint / Pagination / Backfillability is not redefined by METRICS
+
+DATA_MODEL Schema is not invented by METRICS
+
+Ozon remains read-only
 ```
 
-例如：
+命名检查：
 
-```text
-ReturnCase
-ReturnItem
-PostingItem
-```
-
-是数据模型。
-
-```text
-Product Return Rate
-```
-
-是指标。
+- METRICS 不再使用旧的 Performance 域 SKU-Daily 歧义名称；
+- 当前正式名称统一为 `Campaign SKU Daily`；
+- `DATA_SOURCES.md` 中历史采集语境的旧命名不属于 A.3 修改范围。
 
 ---
 
-# 134. 与 PRODUCT.md 的关系
+# 21. 关系到其他文档
 
-`PRODUCT.md` 定义产品能力。
+## 21.1 `DATA_SOURCES.md`
 
-`METRICS.md` 提供这些能力可执行的量化 Contract。
+定义：
 
-例如：
+- Endpoint；
+- Pagination；
+- Verification；
+- Window；
+- Backfillability Evidence。
 
-```text
-PRODUCT:
-库存风险与补货建议
-
-METRICS:
-Days of Cover
-Lost Sales Estimate
-Forecast Demand
-Recommended Replenishment Units
-```
+METRICS 不能为了公式完整而发明 Source。
 
 ---
 
-# 135. 与 ARCHITECTURE.md 的关系
+## 21.2 `DATA_MODEL.md`
 
-本文件不规定：
+定义：
 
-```text
-每天几点同步
-库存每几分钟拉一次
-Worker 数量
-Queue
-Cron
-```
+- Fact；
+- Identity；
+- Field；
+- Source Lineage；
+- Phase execution mapping。
 
-但 ARCHITECTURE 必须保证：
-
-Metric Contract 所需的历史粒度能够被采集。
-
-尤其是：
-
-- Inventory Snapshot；
-- Campaign SKU Daily；
-- Schedule History；
-- FX Interval；
-- Seller Cost History。
+METRICS 只定义 Fact 如何计算成 Metric。
 
 ---
 
-# 136. 核心指标原则
+## 21.3 `PRODUCT.md`
 
-**一个指标只有一个正式口径。**
+定义 Capability 与 Feature Phase。
 
-**官方指标、内部计算和估算必须分开。**
+METRICS 只为当前 Active Capability 提供量化 Contract；未来 Capability 可以存在于 PRODUCT，但其 Metric Definition 在对应 Phase 前保持 Deferred。
 
-**分子和分母比显示名称更重要。**
+---
 
-**Ratio 跨维度聚合时重新计算，不平均 Ratio。**
+## 21.4 `ARCHITECTURE.md`
+
+定义 Runtime、Time Semantics、Observability 和 Reprocessing。
+
+Pipeline Freshness / Duplicate / Sync Gap 诊断归 `ARCHITECTURE.md §27 Observability`，不重新包装成业务 Metric Catalog。
+
+---
+
+# 22. Core Invariants
+
+**一个 Metric Code 只有一个正式口径。**
+
+**Source、Ozon Reference、Derived、Estimate 必须可区分。**
+
+**`metric_origin != contract_shape`。**
+
+**Ratio 聚合重新汇总分子 / 分母，不平均 Ratio。**
+
+**Denominator 0 返回 `NULL + NO_DENOMINATOR`。**
 
 **Money 不跨币种直接相加。**
 
-**原始金额永远不被 Reporting Currency 覆盖。**
+**原始 Money 不被 Reporting Currency 覆盖。**
 
-**缺失不等于 0。**
+**Missing / Unknown 不等于 0。**
 
-**Denominator 为 0 时返回 N/A。**
+**Mother Order、Posting、Unit 是不同计数单位。**
 
-**订单、母订单和商品件数是不同计数单位。**
+**默认经营订单只排除已确认发货前取消。**
 
-**经营结果类订单指标默认只排除已确认发货前取消订单。**
+**待发货未取消仍属于有效订单。**
 
-**待发货但未取消订单仍是有效订单；只有已确认发货前取消才从默认经营统计中排除。**
+**Created Demand 与 Eligible Sales 分开。**
 
-**Created Demand 与 Eligible Sales 必须分开。**
+**Analytics Source 与 Order Fact 不互相覆盖。**
 
-**真实 Finance Fact 不因订单发货前取消而删除。**
+**Sellable Stock、Reserved、In-transit 分开。**
 
-**Ozon Analytics 与订单事实是两个来源口径。**
+**缺失库存 Snapshot 不等于缺货。**
 
-**当前库存与在途库存分开。**
+**Product Return Rate 使用可追溯 Delivery Cohort。**
 
-**Sellable Stock 与 Reserved 分开。**
+**Ozon Buyout Reference 与 O3Pilot Buyout 分开。**
 
-**Product Weight、Package Weight 与 Chargeable Weight 分开。**
+**Ozon 取消 / 时效 Reference 与 O3Pilot Operational Metric 分开。**
 
-**Ozon Reference 补货规则不等于 O3Pilot 永久算法。**
+**Persisted DERIVED Result 必须满足 Historical Recalculation Invariant。**
 
-**产品退货率使用可追溯 Cohort。**
+**Alert / Recommendation 不重新定义 Metric。**
 
-**认购率必须区分 Ozon 最近 50 单 Reference 与 O3Pilot 自算。**
-
-**Finance 是财务事实，Performance 是广告归因事实。**
-
-**同一笔广告费用只能扣一次。**
-
-**历史利润优先使用历史实际采购成本。**
-
-**利润必须展示数据覆盖情况。**
-
-**Forecast 必须接受历史回测。**
-
-**WAPE 和 Bias 比一个漂亮的“准确率”更重要。**
-
-**指标变化必须版本化。**
+**Future Feature 的提前 Acquisition 不等于提前实现 Future Metric。**
 
 **O3Pilot 永远只读 Ozon。**
-
-
----
-
-# 137. 本版参考基线
-
-本版 Metric Contract 以 2026-09-03 当前 O3Pilot 基线和开发参考资料为基础，主要包括：
-
-```text
-PRODUCT.md v1.0
-DATA_SOURCES.md v1.0
-DATA_MODEL.md v1.0
-
-Ozon Seller API 当前实测资料
-Ozon Performance API 当前实测资料
-Finance Accrual v1 新旧对账资料
-
-已认购商品.md
-商品可售性和错失的销售.md
-服务质量指标.md
-报告.md
-```
-
-使用规则：
-
-1. API 实测只证明当前真实字段与行为；
-2. Ozon 知识库用于解释官方业务口径；
-3. 如果 API Source Metric 与知识库 Reference Metric 不是同一个 Contract，分别建指标；
-4. 如果两个官方页面存在不同窗口或分子分母，分别保存，不强行统一；
-5. 当前无法验证的公式保持 `UNVERIFIED`，不补全猜测。
-
----
-
-# 138. 当前跨文档同步提示
-
-当前 `DATA_SOURCES.md v1.0` 已正式加入：
-
-```text
-Ozon Exchange Rate API
-Seller Cost FX
-马帮 ERP Cost Adapter
-Seller Logistics
-In-transit Inventory
-Settlement / Payout
-```
-
-`METRICS.md v1.0` 已按照这些来源定义对应 Metric Contract。
-
-如果后续 `PRODUCT.md` 的“运行时数据源”列表仍未显式列出 `Ozon Exchange Rate API`，应在下一次 PRODUCT 基线复核时同步文字描述；这不改变当前 Metric 与 Data Source Contract。
